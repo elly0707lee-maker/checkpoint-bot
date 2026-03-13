@@ -11,9 +11,9 @@ import anthropic
 from datetime import datetime
 
 # ── 설정 ──────────────────────────────────────────────────
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "여기에_텔레그램_봇_토큰")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "여기에_ANTHROPIC_API_KEY")
-ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))  # 예니 본인 텔레그램 ID
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -23,60 +23,61 @@ logger = logging.getLogger(__name__)
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+# ── 메시지 버퍼 (사용자별로 모아두기) ────────────────────
+message_buffer = {}
+
 # ── Claude 프롬프트 ────────────────────────────────────────
 SYSTEM_PROMPT = """너는 한국 경제방송 앵커의 방송 전 브리핑을 도와주는 전문 어시스턴트야.
 
-사용자가 뉴스 기사, 링크 내용, 요약 텍스트, 또는 미국 증시 마감 데이터를 보내면
-아래 형식으로 즉시 정리해줘.
+사용자가 "정리해줘" 또는 "체크포인트" 라고 하면, 그동안 받은 모든 내용을 하나의 체크포인트로 통합 정리해줘.
+사용자가 뉴스/기사/미증시 마감을 보내면 "✅ 받았어요. 더 보내시면 같이 정리할게요!" 라고만 답해줘.
 
-**판단 규칙:**
-1. 미국 증시 지수(다우, 나스닥, S&P500), 마감 수치가 포함된 내용 → 📌美증시 마감 섹션
-2. 뉴스/기사/이슈 → 영향받는 섹터 + 코스피/코스닥 관련 종목 분류
-3. 둘 다 섞인 경우 → 모두 반영
-
-**출력 형식 (해당 항목만 표시, 없으면 생략):**
+정리 요청이 왔을 때 출력 형식:
 
 {날짜} Check Point✨
 
 📌美증시 마감
-[마감 수치와 핵심 이슈를 2-3줄로 압축. 없으면 이 섹션 생략]
+[마감 수치와 핵심 이슈를 2-3줄로 압축. 미증시 내용이 없으면 이 섹션 생략]
 
 📌Sector
-[영향받는 섹터명]
-- 핵심 내용 1 (숫자/팩트 중심)
-- 핵심 내용 2
-[섹터가 여러 개면 섹터별로 반복]
+✔️[섹터명] ← 사용자가 섹터를 직접 언급했으면 반드시 그 섹터명 사용
+- 핵심 내용 (숫자/팩트 중심)
+- 핵심 내용
+- 관련 종목: 종목A, 종목B, 종목C ← 기사에 언급된 종목은 여기 포함
+[섹터가 여러 개면 ✔️섹터명으로 반복]
 
 📌코스피
-[종목명 (업종)]
-- 관련 내용 (왜 영향받는지 한 줄)
-[종목이 여러 개면 종목별로 반복. 코스피 관련 종목 없으면 생략]
+[종목명] ← 섹터 기사와 무관하게 별도로 언급된 코스피 종목만
+- 관련 내용
+[없으면 섹션 생략]
 
 📌코스닥
-[종목명 (업종)]
-- 관련 내용 (왜 영향받는지 한 줄)
-[종목이 여러 개면 종목별로 반복. 코스닥 관련 종목 없으면 생략]
+[종목명] ← 섹터 기사와 무관하게 별도로 언급된 코스닥 종목만
+- 관련 내용
+[없으면 섹션 생략]
 
-**스타일 규칙:**
-- 팩트와 수치 중심, 군더더기 없이
-- 앵커가 방송 전 30초 안에 훑고 머릿속에 넣을 수 있는 밀도
-- 종목은 반드시 코스피/코스닥 구분 (애매하면 "코스피 추정" 등으로 표시)
-- 섹터는 반도체, AI/데이터센터, 바이오, 2차전지, 방산, 조선, 금융, 에너지, 소비재 등 테마 기준
-- 날짜는 오늘 날짜 자동 적용"""
+엄격한 규칙:
+1. ** 표시 절대 사용 금지. 볼드체 없음.
+2. 섹터 중분류는 반드시 ✔️ 사용
+3. 기사에 언급된 종목은 해당 섹터 안 "관련 종목:" 줄에만 표시. 코스피/코스닥 칸에 중복 표시 금지.
+4. 코스피/코스닥 칸은 섹터 기사와 무관하게 단독으로 언급된 종목만.
+5. 사용자가 섹터를 직접 언급하면 (예: "섹터/바이오", "바이오 섹터로") 반드시 그 섹터명 그대로 사용.
+6. 여러 기사를 받았어도 최종 출력은 하나의 체크포인트로 통합."""
 
 
-async def analyze_news(text: str) -> str:
-    """Claude API로 뉴스 분석"""
+async def analyze_news(messages: list) -> str:
+    """Claude API로 누적 메시지 통합 분석"""
     today = datetime.now().strftime("%-m/%-d")
+    combined = "\n\n---\n\n".join(messages)
 
     response = client.messages.create(
         model="claude-opus-4-20250514",
-        max_tokens=1500,
+        max_tokens=2000,
         system=SYSTEM_PROMPT,
         messages=[
             {
                 "role": "user",
-                "content": f"오늘 날짜: {today}\n\n아래 내용을 정리해줘:\n\n{text}",
+                "content": f"오늘 날짜: {today}\n\n지금까지 받은 내용들을 하나의 체크포인트로 통합 정리해줘:\n\n{combined}",
             }
         ],
     )
@@ -84,10 +85,8 @@ async def analyze_news(text: str) -> str:
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """텔레그램 메시지 처리"""
     user_id = update.effective_user.id
 
-    # 허용된 사용자만 (0이면 전체 허용)
     if ALLOWED_USER_ID != 0 and user_id != ALLOWED_USER_ID:
         await update.message.reply_text("접근 권한이 없습니다.")
         return
@@ -96,40 +95,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_text or not user_text.strip():
         return
 
-    # 짧은 명령어는 무시
-    if len(user_text.strip()) < 10:
-        await update.message.reply_text(
-            "뉴스 내용이나 미증시 마감 데이터를 붙여넣어 주세요! 📋"
-        )
-        return
+    # 정리 요청 감지
+    trigger_words = ["정리해줘", "정리해", "체크포인트", "checkpoint", "정리 해줘"]
+    is_trigger = any(word in user_text.lower() for word in trigger_words)
 
-    # 처리 중 표시
-    processing_msg = await update.message.reply_text("⏳ 분석 중...")
+    if is_trigger:
+        if user_id not in message_buffer or not message_buffer[user_id]:
+            await update.message.reply_text("아직 받은 내용이 없어요! 기사나 뉴스를 먼저 보내주세요 📋")
+            return
 
-    try:
-        result = await analyze_news(user_text)
-        await processing_msg.delete()
-        await update.message.reply_text(result, parse_mode=None)
-    except Exception as e:
-        logger.error(f"분석 오류: {e}")
-        await processing_msg.edit_text(f"❌ 오류가 발생했어요: {str(e)[:100]}")
+        processing_msg = await update.message.reply_text("⏳ 통합 정리 중...")
+        try:
+            result = await analyze_news(message_buffer[user_id])
+            message_buffer[user_id] = []  # 버퍼 초기화
+            await processing_msg.delete()
+            await update.message.reply_text(result)
+        except Exception as e:
+            logger.error(f"분석 오류: {e}")
+            await processing_msg.edit_text(f"❌ 오류가 발생했어요: {str(e)[:100]}")
+    else:
+        # 내용 버퍼에 쌓기
+        if len(user_text.strip()) < 10:
+            await update.message.reply_text("뉴스 내용이나 미증시 마감 데이터를 붙여넣어 주세요! 📋")
+            return
 
+        if user_id not in message_buffer:
+            message_buffer[user_id] = []
 
-async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """URL이 포함된 메시지 처리 (텍스트와 동일하게)"""
-    await handle_message(update, context)
+        message_buffer[user_id].append(user_text)
+        count = len(message_buffer[user_id])
+        await update.message.reply_text(f"✅ 받았어요! ({count}개 누적) 더 보내시거나 '정리해줘' 라고 하시면 한번에 정리할게요!")
 
 
 def main():
-    """봇 실행"""
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    # 텍스트 메시지 핸들러
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     logger.info("🚀 CheckPoint Bot 시작!")
     app.run_polling(drop_pending_updates=True)
 
 
-if __name__ == "__main__":
+if __name__ == "main__":
     main()
