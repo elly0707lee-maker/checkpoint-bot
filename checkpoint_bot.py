@@ -47,7 +47,7 @@ SYSTEM_PROMPT = """너는 한국 경제방송 앵커의 방송 전 브리핑을 
 2. KOSPI 태그가 있으면 → 반드시 📌코스피 칸에만 표시. 섹터 칸에 넣지 말 것.
 3. KOSDAQ 태그가 있으면 → 반드시 📌코스닥 칸에만 표시. 섹터 칸에 넣지 말 것.
 4. US_MARKET 태그가 있으면 → 📌美증시 마감 칸에 표시
-5. US_MARKET 태그가 하나도 없으면 → 📌美증시 마감 섹션 절대 생성하지 말 것. 기사 내용에서 미증시 정보를 추론해서 넣지 말 것.
+5. US_MARKET 태그가 하나도 없으면 → 📌美증시 마감 섹션 절대 생성하지 말 것.
 6. AUTO 태그 내용은 네가 섹터 판단해서 분류
 7. ** 볼드 표시 절대 금지
 8. 섹터 중분류는 ✔️ 사용
@@ -75,35 +75,30 @@ SYSTEM_PROMPT = """너는 한국 경제방송 앵커의 방송 전 브리핑을 
 [종목명]
 - 관련 내용"""
 
+EDIT_PROMPT = """너는 체크포인트 문서를 수정하는 어시스턴트야.
+
+규칙:
+1. ** 볼드 표시 절대 금지
+2. 섹터 중분류는 ✔️ 사용
+3. 원본 형식과 구조를 그대로 유지하면서 해당 항목만 수정
+4. 수정 지시가 없는 부분은 절대 건드리지 말 것
+5. 전체 체크포인트를 그대로 출력 (수정된 부분 포함)"""
+
 
 def parse_user_tag(text: str):
-    """
-    사용자가 보낸 메시지에서 태그 추출
-    반환: (tag_type, tag_value, content)
-    tag_type: "SECTOR" | "KOSPI" | "KOSDAQ" | "US_MARKET" | "AUTO"
-    """
-    # 섹터 태그: "섹터/2차전지" 또는 "섹터 / 2차전지"
+    """사용자 태그 추출"""
     sector_match = re.match(r"^섹터\s*/\s*(.+?)[\n\r]", text + "\n", re.IGNORECASE)
     if sector_match:
-        tag_value = sector_match.group(1).strip()
-        content = text[sector_match.end():].strip()
-        return "SECTOR", tag_value, content
+        return "SECTOR", sector_match.group(1).strip(), text[sector_match.end():].strip()
 
-    # 코스피 태그: "코스피/종목명"
     kospi_match = re.match(r"^코스피\s*/\s*(.+?)[\n\r]", text + "\n", re.IGNORECASE)
     if kospi_match:
-        tag_value = kospi_match.group(1).strip()
-        content = text[kospi_match.end():].strip()
-        return "KOSPI", tag_value, content
+        return "KOSPI", kospi_match.group(1).strip(), text[kospi_match.end():].strip()
 
-    # 코스닥 태그: "코스닥/종목명"
     kosdaq_match = re.match(r"^코스닥\s*/\s*(.+?)[\n\r]", text + "\n", re.IGNORECASE)
     if kosdaq_match:
-        tag_value = kosdaq_match.group(1).strip()
-        content = text[kosdaq_match.end():].strip()
-        return "KOSDAQ", tag_value, content
+        return "KOSDAQ", kosdaq_match.group(1).strip(), text[kosdaq_match.end():].strip()
 
-    # 미증시 마감 태그: "미증시" 또는 "美증시" 로 시작하거나 지수 수치가 포함된 짧은 텍스트
     us_keywords = ["다우", "나스닥", "s&p", "S&P", "미증시", "美증시", "뉴욕증시", "월스트리트"]
     if any(kw in text for kw in us_keywords) and len(text) < 500:
         return "US_MARKET", "", text
@@ -112,7 +107,6 @@ def parse_user_tag(text: str):
 
 
 def format_buffer_for_claude(buffer: list) -> str:
-    """버퍼를 Claude에게 보낼 구조화된 텍스트로 변환"""
     parts = []
     for item in buffer:
         tag_type, tag_value, content = item
@@ -130,14 +124,11 @@ def format_buffer_for_claude(buffer: list) -> str:
 
 
 async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = None) -> str:
-    """Claude API로 체크포인트 생성"""
     structured = format_buffer_for_claude(buffer)
-
     if prev_checkpoint:
         user_content = (
-            f"날짜: {date_str}\n\n"
-            f"기존 체크포인트:\n{prev_checkpoint}\n\n"
-            f"---\n\n추가 내용 (아래를 반영해서 업데이트해줘):\n\n{structured}"
+            f"날짜: {date_str}\n\n기존 체크포인트:\n{prev_checkpoint}\n\n"
+            f"---\n\n추가 내용 (반영해서 업데이트해줘):\n\n{structured}"
         )
     else:
         user_content = f"날짜: {date_str}\n\n{structured}"
@@ -147,6 +138,31 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         max_tokens=2000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_content}],
+    )
+    return response.content[0].text
+
+
+async def apply_partial_edit(checkpoint: str, edit_type: str, target: str, new_content: str) -> str:
+    """부분수정: Claude에게 특정 항목만 수정 요청"""
+    if edit_type == "섹터":
+        instruction = f"📌Sector 아래 ✔️{target} 섹션의 내용을 아래로 교체해줘:\n{new_content}"
+    elif edit_type == "코스피":
+        instruction = f"📌코스피 아래 '{target}' 항목의 내용을 아래로 교체해줘:\n{new_content}"
+    elif edit_type == "코스닥":
+        instruction = f"📌코스닥 아래 '{target}' 항목의 내용을 아래로 교체해줘:\n{new_content}"
+    elif edit_type == "미증시":
+        instruction = f"📌美증시 마감 섹션 내용을 아래로 교체해줘:\n{new_content}"
+    else:
+        instruction = f"'{target}' 항목을 찾아서 내용을 아래로 교체해줘:\n{new_content}"
+
+    response = client.messages.create(
+        model="claude-opus-4-20250514",
+        max_tokens=2000,
+        system=EDIT_PROMPT,
+        messages=[{
+            "role": "user",
+            "content": f"아래 체크포인트에서 {instruction}\n\n체크포인트:\n{checkpoint}"
+        }],
     )
     return response.content[0].text
 
@@ -174,16 +190,64 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_state[user_id] = {"date": date_str, "buffer": [], "last_checkpoint": None}
         await update.message.reply_text(
             f"📅 {date_str} 체크포인트 새로 시작!\n"
-            f"기사 보낼 때 앞에 태그 붙여주시면 정확하게 분류할게요 ✅\n\n"
             f"태그 예시:\n"
-            f"섹터/폴더블 → 기사내용\n"
-            f"코스닥/아크릴 → 기사내용\n"
-            f"코스피/삼성전자 → 기사내용\n"
-            f"(태그 없이 보내도 자동 분류해요)"
+            f"섹터/폴더블 + 기사내용\n"
+            f"코스닥/아크릴 + 기사내용\n"
+            f"수정/코스피/LG디스플레이 + 수정내용\n"
+            f"전체수정 + 체크포인트 전문"
         )
         return
 
-    # ── 2) 정리 요청 ──
+    # ── 2) 전체수정 ──
+    if text.startswith("전체수정"):
+        new_checkpoint = text[4:].strip()
+        if not new_checkpoint:
+            await update.message.reply_text("전체수정 뒤에 체크포인트 내용을 붙여주세요!")
+            return
+
+        if user_id not in user_state:
+            today = datetime.now().strftime("%-m/%-d")
+            user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None}
+
+        user_state[user_id]["last_checkpoint"] = new_checkpoint
+        user_state[user_id]["buffer"] = []
+
+        # 날짜 자동 추출
+        date_match = re.search(r"(\d{1,2}/\d{1,2})", new_checkpoint)
+        if date_match:
+            user_state[user_id]["date"] = date_match.group(1)
+
+        await update.message.reply_text(
+            "✅ 전체수정 완료! 이 내용을 베이스로 추가 기사 쌓을게요.\n\n" + new_checkpoint
+        )
+        return
+
+    # ── 3) 부분수정: "수정/코스피/LG디스플레이\n내용" ──
+    edit_match = re.match(r"^수정\s*/\s*(.+?)\s*/\s*(.+?)[\n\r](.*)", text, re.DOTALL)
+    if edit_match:
+        edit_type = edit_match.group(1).strip()   # 코스피, 코스닥, 섹터, 미증시
+        target = edit_match.group(2).strip()       # 종목명 또는 섹터명
+        new_content = edit_match.group(3).strip()  # 새 내용
+
+        state = user_state.get(user_id)
+        if not state or not state.get("last_checkpoint"):
+            await update.message.reply_text("수정할 체크포인트가 없어요! 먼저 체크포인트를 만들어 주세요.")
+            return
+
+        processing_msg = await update.message.reply_text(f"⏳ {edit_type}/{target} 수정 중...")
+        try:
+            result = await apply_partial_edit(
+                state["last_checkpoint"], edit_type, target, new_content
+            )
+            user_state[user_id]["last_checkpoint"] = result
+            await processing_msg.delete()
+            await update.message.reply_text("✅ 수정 완료!\n\n" + result)
+        except Exception as e:
+            logger.error(f"수정 오류: {e}")
+            await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
+        return
+
+    # ── 4) 정리 요청 ──
     trigger_words = ["정리해줘", "정리해", "정리 해줘", "뽑아줘"]
     is_trigger = any(word in text for word in trigger_words)
 
@@ -211,7 +275,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
         return
 
-    # ── 3) 일반 내용 → 태그 파싱 후 버퍼에 쌓기 ──
+    # ── 5) 일반 내용 → 버퍼에 쌓기 ──
     if len(text) < 5:
         return
 
@@ -223,7 +287,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_state[user_id]["buffer"].append((tag_type, tag_value, content))
     count = len(user_state[user_id]["buffer"])
 
-    # 태그 확인 메시지
     tag_display = {
         "SECTOR": f"✔️섹터/{tag_value}",
         "KOSPI": f"📌코스피/{tag_value}",
@@ -232,7 +295,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "AUTO": "🔍자동분류",
     }
     label = tag_display.get(tag_type, "")
-
     is_append = bool(user_state[user_id].get("last_checkpoint"))
     mode = "추가" if is_append else "누적"
 
