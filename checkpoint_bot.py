@@ -81,8 +81,8 @@ async def enrich_text_with_url(text: str) -> str:
     for url in urls:
         fetched = await fetch_url_text(url)
         if fetched:
-            # URL 자리에 크롤링된 내용 추가
-            enriched = enriched.replace(url, f"{url}\n[기사내용]\n{fetched}")
+            # URL 자리에 크롤링된 내용 추가 ([기사내용] 마커 없이)
+            enriched = enriched.replace(url, f"{url}\n{fetched}")
             logger.info(f"크롤링 성공: {url}")
         else:
             logger.info(f"크롤링 실패, 원문 텍스트 사용: {url}")
@@ -236,42 +236,77 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         # Claude에게 넘길 내용이 없으면 날짜 헤더만
         base = f"{date_str} Check Point✨"
 
-    # 기존 체크포인트의 코스피/코스닥 항목 파싱해서 유지
-    existing_kospi = []
-    existing_kosdaq = []
+    # 기존 체크포인트의 코스피/코스닥 항목 파싱해서 종목별로 저장
+    # { 종목명: [불릿라인, ...] }
+    existing_kospi_map = {}
+    existing_kosdaq_map = {}
+
     if prev_checkpoint:
-        kospi_section = re.search(r"📌코스피\n(.*?)(?=\n📌|$)", prev_checkpoint, re.DOTALL)
-        kosdaq_section = re.search(r"📌코스닥\n(.*?)(?=\n📌|$)", prev_checkpoint, re.DOTALL)
-        if kospi_section:
-            existing_kospi = [kospi_section.group(1).strip()]
-        if kosdaq_section:
-            existing_kosdaq = [kosdaq_section.group(1).strip()]
+        def parse_stock_section(section_text: str) -> dict:
+            """코스피/코스닥 섹션에서 종목별 내용 파싱"""
+            result = {}
+            current_name = None
+            current_lines = []
+            for line in section_text.strip().split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("-"):
+                    if current_name:
+                        current_lines.append(line)
+                else:
+                    if current_name:
+                        result[current_name] = current_lines
+                    current_name = line
+                    current_lines = []
+            if current_name:
+                result[current_name] = current_lines
+            return result
 
-    # 코스피 섹션 직접 생성
-    def summarize_content(content: str) -> str:
-        """기사 내용에서 핵심 불릿만 추출 (길면 앞 3줄)"""
-        lines = [l.strip() for l in content.split("\n") if l.strip() and not l.startswith("http")]
-        # 헤드라인/제목처럼 보이는 줄 우선
-        bullets = [l for l in lines if len(l) > 5][:4]
-        return "\n".join(f"- {b}" if not b.startswith("-") else b for b in bullets)
+        kospi_m = re.search(r"📌코스피\n(.*?)(?=\n📌|\Z)", prev_checkpoint, re.DOTALL)
+        kosdaq_m = re.search(r"📌코스닥\n(.*?)(?=\n📌|\Z)", prev_checkpoint, re.DOTALL)
+        if kospi_m:
+            existing_kospi_map = parse_stock_section(kospi_m.group(1))
+        if kosdaq_m:
+            existing_kosdaq_map = parse_stock_section(kosdaq_m.group(1))
 
-    kospi_block = ""
-    if kospi_items or existing_kospi:
-        kospi_block = "\n📌코스피\n"
-        if existing_kospi:
-            kospi_block += existing_kospi[0] + "\n"
-        for name, content in kospi_items:
-            summary = summarize_content(content)
-            kospi_block += f"{name}\n{summary}\n"
+    def summarize_content(content: str) -> list:
+        """기사 내용에서 핵심 불릿 추출 - 간결하게 최대 3개"""
+        # [기사내용] 태그 제거
+        content = content.replace("[기사내용]", "").strip()
+        lines = []
+        for l in content.split("\n"):
+            l = l.strip()
+            if not l:
+                continue
+            if l.startswith("http"):
+                continue
+            if any(skip in l for skip in ["기자 구독", "구독하기", "Forwarded from", "today at", "naver.com", "hankyung.com"]):
+                continue
+            lines.append(l)
 
-    kosdaq_block = ""
-    if kosdaq_items or existing_kosdaq:
-        kosdaq_block = "\n📌코스닥\n"
-        if existing_kosdaq:
-            kosdaq_block += existing_kosdaq[0] + "\n"
-        for name, content in kosdaq_items:
-            summary = summarize_content(content)
-            kosdaq_block += f"{name}\n{summary}\n"
+        # 핵심 줄만 최대 3개
+        bullets = [l for l in lines if len(l) > 5][:3]
+        return [f"- {b}" if not b.startswith("-") else b for b in bullets]
+
+    # 새 KOSPI/KOSDAQ 항목을 기존 맵에 병합 (종목명 기준으로 덮어쓰기)
+    for name, content in kospi_items:
+        existing_kospi_map[name] = summarize_content(content)
+    for name, content in kosdaq_items:
+        existing_kosdaq_map[name] = summarize_content(content)
+
+    # 코스피/코스닥 블록 생성
+    def build_stock_block(header: str, stock_map: dict) -> str:
+        if not stock_map:
+            return ""
+        block = f"\n{header}\n"
+        for name, lines in stock_map.items():
+            block += name + "\n"
+            block += "\n".join(lines) + "\n"
+        return block
+
+    kospi_block = build_stock_block("📌코스피", existing_kospi_map)
+    kosdaq_block = build_stock_block("📌코스닥", existing_kosdaq_map)
 
     # 최종 조합
     result = base
