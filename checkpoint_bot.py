@@ -271,9 +271,9 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
             existing_kosdaq_map = parse_stock_section(kosdaq_m.group(1))
 
     def summarize_content(content: str) -> list:
-        """기사 내용에서 핵심 불릿 추출 - 간결하게 최대 3개"""
-        # [기사내용] 태그 제거
+        """기사 내용에서 핵심 불릿 추출 - 간결하게 최대 3개, 중복 제거"""
         content = content.replace("[기사내용]", "").strip()
+        seen = set()
         lines = []
         for l in content.split("\n"):
             l = l.strip()
@@ -281,11 +281,16 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
                 continue
             if l.startswith("http"):
                 continue
-            if any(skip in l for skip in ["기자 구독", "구독하기", "Forwarded from", "today at", "naver.com", "hankyung.com"]):
+            if any(skip in l for skip in ["기자 구독", "구독하기", "Forwarded from", "today at",
+                                           "naver.com", "hankyung.com", "zdnet", "2026.0", "2025.0"]):
                 continue
+            # 중복 제거
+            key = l.replace("-", "").strip()
+            if key in seen:
+                continue
+            seen.add(key)
             lines.append(l)
 
-        # 핵심 줄만 최대 3개
         bullets = [l for l in lines if len(l) > 5][:3]
         return [f"- {b}" if not b.startswith("-") else b for b in bullets]
 
@@ -299,7 +304,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
     def build_stock_block(header: str, stock_map: dict) -> str:
         if not stock_map:
             return ""
-        block = f"\n{header}\n"
+        block = f"\n\n{header}\n"
         for name, lines in stock_map.items():
             block += name + "\n"
             block += "\n".join(lines) + "\n"
