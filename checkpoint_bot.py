@@ -6,8 +6,11 @@ Morning Broadcast CheckPoint Bot 🌅
 import logging
 import os
 import re
-from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+import asyncio
+import aiohttp
+from bs4 import BeautifulSoup
+from telegram import Update, BotCommand
+from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 import anthropic
 from datetime import datetime
 
@@ -23,6 +26,67 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# ── URL 크롤링 (실패하면 None 반환) ──────────────────────
+async def fetch_url_text(url: str) -> str | None:
+    """URL 크롤링 시도. 실패하면 None 반환."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status != 200:
+                    return None
+                html = await resp.text(errors="ignore")
+                soup = BeautifulSoup(html, "html.parser")
+
+                # 본문 추출 시도 (주요 뉴스 사이트 공통 선택자)
+                for selector in ["article", ".article-body", ".article_body", "#articleBody",
+                                  ".news-content", ".content-article", "main"]:
+                    el = soup.select_one(selector)
+                    if el:
+                        text = el.get_text(separator="\n", strip=True)
+                        if len(text) > 100:
+                            return text[:2000]  # 너무 길면 앞부분만
+
+                # 그것도 없으면 og:description / 타이틀만
+                og_desc = soup.find("meta", property="og:description")
+                og_title = soup.find("meta", property="og:title")
+                parts = []
+                if og_title:
+                    parts.append(og_title.get("content", ""))
+                if og_desc:
+                    parts.append(og_desc.get("content", ""))
+                if parts:
+                    return "\n".join(parts)
+                return None
+    except Exception as e:
+        logger.info(f"URL 크롤링 실패 ({url}): {e}")
+        return None
+
+
+def extract_urls(text: str) -> list:
+    """텍스트에서 URL 추출"""
+    return re.findall(r'https?://[^\s]+', text)
+
+
+async def enrich_text_with_url(text: str) -> str:
+    """텍스트 안의 URL을 크롤링해서 내용 보강. 실패하면 원본 텍스트 그대로."""
+    urls = extract_urls(text)
+    if not urls:
+        return text
+
+    enriched = text
+    for url in urls:
+        fetched = await fetch_url_text(url)
+        if fetched:
+            # URL 자리에 크롤링된 내용 추가
+            enriched = enriched.replace(url, f"{url}\n[기사내용]\n{fetched}")
+            logger.info(f"크롤링 성공: {url}")
+        else:
+            logger.info(f"크롤링 실패, 원문 텍스트 사용: {url}")
+    return enriched
 
 # ── 사용자별 상태 저장 ────────────────────────────────────
 user_state = {}
@@ -283,7 +347,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         today = datetime.now().strftime("%-m/%-d")
         user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None}
 
-    tag_type, tag_value, content = parse_user_tag(text)
+    # URL이 포함된 경우 크롤링 시도
+    has_url = bool(extract_urls(text))
+    if has_url:
+        processing_msg = await update.message.reply_text("🔍 링크 읽는 중...")
+        enriched_text = await enrich_text_with_url(text)
+        await processing_msg.delete()
+    else:
+        enriched_text = text
+
+    tag_type, tag_value, content = parse_user_tag(enriched_text)
     user_state[user_id]["buffer"].append((tag_type, tag_value, content))
     count = len(user_state[user_id]["buffer"])
 
@@ -303,8 +376,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+HELP_TEXT = """📋 CheckPoint Bot 명령어
+
+📅 세션시작
+3/16 체크포인트 생성
+
+📥 내용 쌓기
+섹터/전력설비 + 기사내용
+코스피/삼성전자 + 기사내용
+코스닥/아크릴 + 기사내용
+태그 없이 붙여넣기 → 자동분류
+다우/나스닥 포함 텍스트 → 美증시 마감
+
+✅ 정리
+정리해줘
+
+✏️ 부분수정
+수정/코스피/LG디스플레이
+- 새내용
+
+🔄 전체수정
+전체수정
+3/16 Check Point✨
+📌美증시 마감
+...전체내용...
+
+💡 부분수정·전체수정 후에도
+수정본이 베이스가 되어 계속 쌓임"""
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(HELP_TEXT)
+
+
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("🚀 CheckPoint Bot 시작!")
     app.run_polling(drop_pending_updates=True)
