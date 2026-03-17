@@ -281,8 +281,16 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
                 continue
             if l.startswith("http"):
                 continue
-            if any(skip in l for skip in ["기자 구독", "구독하기", "Forwarded from", "today at",
-                                           "naver.com", "hankyung.com", "zdnet", "2026.0", "2025.0"]):
+            # 쓸모없는 줄 필터
+            skip_keywords = ["기자 구독", "구독하기", "Forwarded from", "today at",
+                             "naver.com", "hankyung.com", "zdnet", "2026.0", "2025.0",
+                             "글자크기", "기사 스크랩", "스크랩", "인쇄", "공유", "댓글",
+                             "로그인", "회원가입", "뒤로가기", "font", "Font"]
+            if any(skip in l for skip in skip_keywords):
+                continue
+            # 한글이 없는 짧은 줄 (폰트명, 코드 등) 제거
+            korean_chars = sum(1 for c in l if '\uac00' <= c <= '\ud7a3')
+            if korean_chars < 2 and len(l) < 20:
                 continue
             # 중복 제거
             key = l.replace("-", "").strip()
@@ -304,21 +312,23 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
     def build_stock_block(header: str, stock_map: dict) -> str:
         if not stock_map:
             return ""
-        block = f"\n\n{header}\n"
-        for name, lines in stock_map.items():
-            block += name + "\n"
-            block += "\n".join(lines) + "\n"
-        return block
+        lines_out = [header]  # 헤더 다음 빈 줄 없음
+        items = []
+        for name, bullets in stock_map.items():
+            item_lines = [name] + bullets
+            items.append("\n".join(item_lines))
+        lines_out.append("\n\n".join(items))  # 종목 사이 빈 줄
+        return "\n".join(lines_out)
 
     kospi_block = build_stock_block("📌코스피", existing_kospi_map)
     kosdaq_block = build_stock_block("📌코스닥", existing_kosdaq_map)
 
-    # 최종 조합
-    result = base
+    # 최종 조합 - 섹션 사이 빈 줄 두 개
+    result = base.strip()
     if kospi_block:
-        result += "\n" + kospi_block.strip()
+        result += "\n\n" + kospi_block
     if kosdaq_block:
-        result += "\n\n" + kosdaq_block.strip()
+        result += "\n\n" + kosdaq_block
 
     return result.strip()
 
