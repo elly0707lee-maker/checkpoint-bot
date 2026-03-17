@@ -165,8 +165,9 @@ def parse_user_tag(text: str):
     if kosdaq_match:
         return "KOSDAQ", kosdaq_match.group(1).strip(), text[kosdaq_match.end():].strip()
 
-    us_keywords = ["다우", "나스닥", "s&p", "S&P", "미증시", "美증시", "뉴욕증시", "월스트리트"]
-    if any(kw in text for kw in us_keywords) and len(text) < 500:
+    us_keywords = ["다우", "나스닥", "s&p", "S&P", "미증시", "美증시", "뉴욕증시", "월스트리트",
+                   "미 증시", "미증시", "미국증시", "미국 증시"]
+    if any(kw in text for kw in us_keywords):
         return "US_MARKET", "", text
 
     return "AUTO", "", text
@@ -174,18 +175,23 @@ def parse_user_tag(text: str):
 
 def format_buffer_for_claude(buffer: list) -> str:
     parts = []
+    us_market_lines = []  # 미증시 내용 누적
+
     for item in buffer:
         tag_type, tag_value, content = item
-        if tag_type == "SECTOR":
+        if tag_type == "US_MARKET":
+            us_market_lines.append(content.strip())
+        elif tag_type == "SECTOR":
             parts.append(f"[SECTOR: {tag_value}]\n{content}")
-        elif tag_type == "KOSPI":
-            parts.append(f"[KOSPI: {tag_value}]\n{content}")
-        elif tag_type == "KOSDAQ":
-            parts.append(f"[KOSDAQ: {tag_value}]\n{content}")
-        elif tag_type == "US_MARKET":
-            parts.append(f"[US_MARKET]\n{content}")
-        else:
+        elif tag_type == "AUTO":
             parts.append(f"[AUTO]\n{content}")
+        # KOSPI/KOSDAQ은 여기서 처리 안 함 (코드에서 직접)
+
+    # 미증시 내용 하나로 합쳐서 앞에 추가
+    if us_market_lines:
+        combined_us = "\n".join(us_market_lines)
+        parts.insert(0, f"[US_MARKET]\n{combined_us}")
+
     return "\n\n---\n\n".join(parts)
 
 
@@ -299,7 +305,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
             seen.add(key)
             lines.append(l)
 
-        bullets = [l for l in lines if len(l) > 5][:3]
+        bullets = [l for l in lines if len(l) > 5][:2]
         return [f"- {b}" if not b.startswith("-") else b for b in bullets]
 
     # 새 KOSPI/KOSDAQ 항목을 기존 맵에 병합 (종목명 기준으로 덮어쓰기)
