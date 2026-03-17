@@ -189,22 +189,97 @@ def format_buffer_for_claude(buffer: list) -> str:
 
 
 async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = None) -> str:
-    structured = format_buffer_for_claude(buffer)
-    if prev_checkpoint:
-        user_content = (
-            f"날짜: {date_str}\n\n기존 체크포인트:\n{prev_checkpoint}\n\n"
-            f"---\n\n추가 내용 (반영해서 업데이트해줘):\n\n{structured}"
-        )
-    else:
-        user_content = f"날짜: {date_str}\n\n{structured}"
+    """체크포인트 생성. KOSPI/KOSDAQ은 코드에서 직접 처리, Claude는 SECTOR/AUTO/US_MARKET만 담당."""
 
-    response = client.messages.create(
-        model="claude-opus-4-20250514",
-        max_tokens=2000,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_content}],
-    )
-    return response.content[0].text
+    # KOSPI/KOSDAQ 항목은 코드에서 직접 분리
+    claude_buffer = []
+    kospi_items = []   # [(종목명, 내용), ...]
+    kosdaq_items = []  # [(종목명, 내용), ...]
+
+    for item in buffer:
+        tag_type, tag_value, content = item
+        if tag_type == "KOSPI":
+            kospi_items.append((tag_value, content))
+        elif tag_type == "KOSDAQ":
+            kosdaq_items.append((tag_value, content))
+        else:
+            claude_buffer.append(item)
+
+    # Claude에게는 SECTOR/AUTO/US_MARKET만 넘김
+    if claude_buffer or prev_checkpoint:
+        structured = format_buffer_for_claude(claude_buffer)
+
+        if prev_checkpoint:
+            # 기존 체크포인트에서 코스피/코스닥 섹션 제거 후 Claude에게 넘김
+            # (코스피/코스닥은 아래에서 코드로 직접 붙임)
+            cp_without_kospi_kosdaq = re.split(r"\n📌코스피", prev_checkpoint)[0]
+            user_content = (
+                f"날짜: {date_str}\n\n기존 체크포인트 (📌코스피/코스닥 섹션 제외):\n{cp_without_kospi_kosdaq}\n\n"
+                f"---\n\n추가 내용 (반영해서 업데이트해줘. 📌코스피/📌코스닥 섹션은 출력하지 말 것):\n\n{structured}"
+            )
+        else:
+            user_content = (
+                f"날짜: {date_str}\n\n{structured}\n\n"
+                f"※ 📌코스피/📌코스닥 섹션은 출력하지 말 것. Sector와 美증시만 출력."
+                if structured.strip() else f"날짜: {date_str}"
+            )
+
+        response = client.messages.create(
+            model="claude-opus-4-20250514",
+            max_tokens=2000,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_content}],
+        )
+        base = response.content[0].text.strip()
+    else:
+        # Claude에게 넘길 내용이 없으면 날짜 헤더만
+        base = f"{date_str} Check Point✨"
+
+    # 기존 체크포인트의 코스피/코스닥 항목 파싱해서 유지
+    existing_kospi = []
+    existing_kosdaq = []
+    if prev_checkpoint:
+        kospi_section = re.search(r"📌코스피\n(.*?)(?=\n📌|$)", prev_checkpoint, re.DOTALL)
+        kosdaq_section = re.search(r"📌코스닥\n(.*?)(?=\n📌|$)", prev_checkpoint, re.DOTALL)
+        if kospi_section:
+            existing_kospi = [kospi_section.group(1).strip()]
+        if kosdaq_section:
+            existing_kosdaq = [kosdaq_section.group(1).strip()]
+
+    # 코스피 섹션 직접 생성
+    def summarize_content(content: str) -> str:
+        """기사 내용에서 핵심 불릿만 추출 (길면 앞 3줄)"""
+        lines = [l.strip() for l in content.split("\n") if l.strip() and not l.startswith("http")]
+        # 헤드라인/제목처럼 보이는 줄 우선
+        bullets = [l for l in lines if len(l) > 5][:4]
+        return "\n".join(f"- {b}" if not b.startswith("-") else b for b in bullets)
+
+    kospi_block = ""
+    if kospi_items or existing_kospi:
+        kospi_block = "\n📌코스피\n"
+        if existing_kospi:
+            kospi_block += existing_kospi[0] + "\n"
+        for name, content in kospi_items:
+            summary = summarize_content(content)
+            kospi_block += f"{name}\n{summary}\n"
+
+    kosdaq_block = ""
+    if kosdaq_items or existing_kosdaq:
+        kosdaq_block = "\n📌코스닥\n"
+        if existing_kosdaq:
+            kosdaq_block += existing_kosdaq[0] + "\n"
+        for name, content in kosdaq_items:
+            summary = summarize_content(content)
+            kosdaq_block += f"{name}\n{summary}\n"
+
+    # 최종 조합
+    result = base
+    if kospi_block:
+        result += "\n" + kospi_block.strip()
+    if kosdaq_block:
+        result += "\n\n" + kosdaq_block.strip()
+
+    return result.strip()
 
 
 async def apply_partial_edit(checkpoint: str, edit_type: str, target: str, new_content: str) -> str:
