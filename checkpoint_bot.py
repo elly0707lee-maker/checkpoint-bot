@@ -89,6 +89,7 @@ async def enrich_text_with_url(text: str) -> str:
     return enriched
 
 # ── 사용자별 상태 저장 ────────────────────────────────────
+# { user_id: { "date": "3/13", "buffer": [...], "last_checkpoint": "...", "pending_tag": (tag_type, tag_value) } }
 user_state = {}
 
 # ── Claude 프롬프트 ────────────────────────────────────────
@@ -421,7 +422,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id not in user_state:
         today = datetime.now().strftime("%-m/%-d")
-        user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None}
+        user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None, "pending_tag": None}
+
+    # pending_tag 확인: 직전 메시지가 태그만 단독으로 온 경우
+    pending = user_state[user_id].get("pending_tag")
 
     # URL이 포함된 경우 크롤링 시도
     has_url = bool(extract_urls(text))
@@ -432,8 +436,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         enriched_text = text
 
+    # pending_tag가 있으면 → 이 메시지는 그 태그의 내용으로 자동 묶기
+    if pending:
+        tag_type, tag_value = pending
+        content = enriched_text
+        user_state[user_id]["pending_tag"] = None  # 소비
+        user_state[user_id]["buffer"].append((tag_type, tag_value, content))
+        count = len(user_state[user_id]["buffer"])
+
+        tag_display = {
+            "SECTOR": f"✔️섹터/{tag_value}",
+            "KOSPI": f"📌코스피/{tag_value}",
+            "KOSDAQ": f"📌코스닥/{tag_value}",
+            "US_MARKET": "📌美증시 마감",
+        }
+        label = tag_display.get(tag_type, tag_value)
+        is_append = bool(user_state[user_id].get("last_checkpoint"))
+        mode = "추가" if is_append else "누적"
+        await update.message.reply_text(
+            f"✅ {label} 기사 묶었어요! ({count}개 {mode}) '정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
+        )
+        return
+
     tag_type, tag_value, content = parse_user_tag(enriched_text)
+
+    # 태그만 단독으로 온 경우 (내용 없음) → pending_tag로 저장
+    is_tag_only = (
+        tag_type in ("SECTOR", "KOSPI", "KOSDAQ") and
+        not content.strip()
+    )
+    if is_tag_only:
+        user_state[user_id]["pending_tag"] = (tag_type, tag_value)
+        tag_display = {
+            "SECTOR": f"✔️섹터/{tag_value}",
+            "KOSPI": f"📌코스피/{tag_value}",
+            "KOSDAQ": f"📌코스닥/{tag_value}",
+        }
+        label = tag_display.get(tag_type, tag_value)
+        await update.message.reply_text(
+            f"📌 {label} 태그 받았어요! 다음 메시지를 이 태그로 묶을게요 ✅"
+        )
+        return
+
+    # 일반 처리
     user_state[user_id]["buffer"].append((tag_type, tag_value, content))
+    user_state[user_id]["pending_tag"] = None
     count = len(user_state[user_id]["buffer"])
 
     tag_display = {
