@@ -103,14 +103,15 @@ async def extract_indicators_from_image(image_bytes: bytes, mime_type: str = "im
                         "type": "text",
                         "text": (
                             "이 이미지에서 시장 지표 수치만 추출해줘.\n"
-                            "형식: 항목명 수치 등락(%)\n"
+                            "형식: 항목명 현재값 (등락%)\n"
+                            "등락률은 반드시 괄호 안에 넣을 것.\n"
                             "예시:\n"
-                            "SOX (필라델피아반도체) 7,773.13 +1.34%\n"
-                            "VIX 23.95 -1.45%\n"
-                            "EWY 133.81 +6.38%\n"
-                            "WTI 90.70 +2.92%\n"
-                            "DXY 99.17 +0.23%\n"
-                            "US10Y 4.362% +0.026\n\n"
+                            "SOX 7,773.13 (+1.34%)\n"
+                            "VIX 23.95 (-1.45%)\n"
+                            "EWY 133.81 (+6.38%)\n"
+                            "WTI 90.70 (+2.92%)\n"
+                            "DXY 99.17 (+0.23%)\n"
+                            "US10Y 4.362% (+0.026)\n\n"
                             "수치가 없는 항목은 제외. 설명 없이 수치만 나열."
                         )
                     }
@@ -494,30 +495,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
         return
 
-    # ── 5) 이미지 확인 응답 ("확인" or "맞아" 등) ──
-    confirm_words = ["확인", "맞아", "맞아요", "저장", "ok", "OK", "ㅇㅋ"]
-    state = user_state.get(user_id, {})
-    pending_indicator = state.get("pending_indicator_image")
-
-    if pending_indicator and any(w in text for w in confirm_words):
-        if user_id not in user_state:
-            today = datetime.now().strftime("%-m/%-d")
-            user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None, "pending_tag": None}
-        user_state[user_id]["buffer"].append(("INDICATOR", "", pending_indicator))
-        user_state[user_id]["pending_indicator_image"] = None
-        count = len(user_state[user_id]["buffer"])
-        is_append = bool(user_state[user_id].get("last_checkpoint"))
-        mode = "추가" if is_append else "누적"
-        await update.message.reply_text(
-            f"✅ 📌지표 저장 완료! ({count}개 {mode}) '정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
-        )
-        return
-
-    # 이미지 대기 중인데 다른 텍스트가 들어오면 취소
-    if pending_indicator:
-        user_state[user_id]["pending_indicator_image"] = None
-
-    # ── 6) 일반 내용 → 버퍼에 쌓기 ──
+    # ── 5) 일반 내용 → 버퍼에 쌓기 ──
     if len(text) < 5:
         return
 
@@ -596,7 +574,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── 이미지 핸들러 ─────────────────────────────────────────
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """이미지 수신 → Claude Vision으로 지표 추출 → 확인 요청"""
+    """이미지 수신 → Claude Vision으로 지표 추출 → 즉시 버퍼 저장"""
     user_id = update.effective_user.id
     if ALLOWED_USER_ID != 0 and user_id != ALLOWED_USER_ID:
         return
@@ -604,33 +582,34 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     processing_msg = await update.message.reply_text("📸 이미지 읽는 중...")
 
     try:
-        # 가장 큰 해상도 사진 선택
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
 
-        # 이미지 다운로드
         async with aiohttp.ClientSession() as session:
             async with session.get(file.file_path) as resp:
                 image_bytes = await resp.read()
 
-        # Claude Vision으로 지표 추출
         extracted = await extract_indicators_from_image(image_bytes, "image/jpeg")
 
         if not extracted:
             await processing_msg.edit_text("❌ 이미지에서 지표를 읽지 못했어요. 다시 시도해주세요.")
             return
 
-        # 확인 대기 상태로 저장
+        # 확인 없이 즉시 버퍼에 저장
         if user_id not in user_state:
             today = datetime.now().strftime("%-m/%-d")
             user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None, "pending_tag": None}
 
-        user_state[user_id]["pending_indicator_image"] = extracted
+        user_state[user_id]["buffer"].append(("INDICATOR", "", extracted))
+        count = len(user_state[user_id]["buffer"])
+        is_append = bool(user_state[user_id].get("last_checkpoint"))
+        mode = "추가" if is_append else "누적"
 
         await processing_msg.delete()
         await update.message.reply_text(
-            f"📊 읽은 지표예요. 맞으면 '확인', 틀리면 수정해서 보내주세요:\n\n"
-            f"📌지표\n{extracted}"
+            f"✅ 📌지표 저장 완료! ({count}개 {mode})\n\n"
+            f"📌지표\n{extracted}\n\n"
+            f"'정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
         )
 
     except Exception as e:
