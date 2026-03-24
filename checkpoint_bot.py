@@ -1,6 +1,8 @@
 """
 Morning Broadcast CheckPoint Bot 🌅
 방송 전 뉴스 → 섹터/종목 자동 분류 텔레그램 봇
++ 지표 텍스트 태그 지원
++ 이미지 캡쳐 → Claude Vision 자동 인식
 """
 
 import logging
@@ -8,6 +10,7 @@ import os
 import re
 import asyncio
 import aiohttp
+import base64
 from bs4 import BeautifulSoup
 from telegram import Update, BotCommand
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
@@ -27,9 +30,8 @@ logger = logging.getLogger(__name__)
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# ── URL 크롤링 (실패하면 None 반환) ──────────────────────
+# ── URL 크롤링 ──────────────────────────────────────────
 async def fetch_url_text(url: str) -> str | None:
-    """URL 크롤링 시도. 실패하면 None 반환."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
     }
@@ -40,17 +42,13 @@ async def fetch_url_text(url: str) -> str | None:
                     return None
                 html = await resp.text(errors="ignore")
                 soup = BeautifulSoup(html, "html.parser")
-
-                # 본문 추출 시도 (주요 뉴스 사이트 공통 선택자)
                 for selector in ["article", ".article-body", ".article_body", "#articleBody",
                                   ".news-content", ".content-article", "main"]:
                     el = soup.select_one(selector)
                     if el:
                         text = el.get_text(separator="\n", strip=True)
                         if len(text) > 100:
-                            return text[:2000]  # 너무 길면 앞부분만
-
-                # 그것도 없으면 og:description / 타이틀만
+                            return text[:2000]
                 og_desc = soup.find("meta", property="og:description")
                 og_title = soup.find("meta", property="og:title")
                 parts = []
@@ -65,31 +63,69 @@ async def fetch_url_text(url: str) -> str | None:
         logger.info(f"URL 크롤링 실패 ({url}): {e}")
         return None
 
-
 def extract_urls(text: str) -> list:
-    """텍스트에서 URL 추출"""
     return re.findall(r'https?://[^\s]+', text)
 
-
 async def enrich_text_with_url(text: str) -> str:
-    """텍스트 안의 URL을 크롤링해서 내용 보강. 실패하면 원본 텍스트 그대로."""
     urls = extract_urls(text)
     if not urls:
         return text
-
     enriched = text
     for url in urls:
         fetched = await fetch_url_text(url)
         if fetched:
-            # URL 자리에 크롤링된 내용 추가 ([기사내용] 마커 없이)
             enriched = enriched.replace(url, f"{url}\n{fetched}")
             logger.info(f"크롤링 성공: {url}")
         else:
             logger.info(f"크롤링 실패, 원문 텍스트 사용: {url}")
     return enriched
 
+# ── 이미지 → Claude Vision으로 지표 추출 ──────────────────
+async def extract_indicators_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str | None:
+    """이미지에서 시장 지표 수치를 추출해 텍스트로 반환"""
+    try:
+        image_data = base64.standard_b64encode(image_bytes).decode("utf-8")
+        response = client.messages.create(
+            model="claude-opus-4-20250514",
+            max_tokens=500,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": mime_type,
+                            "data": image_data,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "이 이미지에서 시장 지표 수치만 추출해줘.\n"
+                            "형식: 항목명 수치 등락(%)\n"
+                            "예시:\n"
+                            "SOX (필라델피아반도체) 7,773.13 +1.34%\n"
+                            "VIX 23.95 -1.45%\n"
+                            "EWY 133.81 +6.38%\n"
+                            "WTI 90.70 +2.92%\n"
+                            "DXY 99.17 +0.23%\n"
+                            "US10Y 4.362% +0.026\n\n"
+                            "수치가 없는 항목은 제외. 설명 없이 수치만 나열."
+                        )
+                    }
+                ],
+            }]
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        logger.error(f"이미지 분석 오류: {e}")
+        return None
+
 # ── 사용자별 상태 저장 ────────────────────────────────────
-# { user_id: { "date": "3/13", "buffer": [...], "last_checkpoint": "...", "pending_tag": (tag_type, tag_value) } }
+# { user_id: { "date": "3/13", "buffer": [...], "last_checkpoint": "...",
+#              "pending_tag": (tag_type, tag_value),
+#              "pending_indicator_image": "텍스트" } }
 user_state = {}
 
 # ── Claude 프롬프트 ────────────────────────────────────────
@@ -105,25 +141,30 @@ SYSTEM_PROMPT = """너는 한국 경제방송 앵커의 방송 전 브리핑을 
 - KOSPI: 코스피 종목명 (사용자가 직접 지정)
 - KOSDAQ: 코스닥 종목명 (사용자가 직접 지정)
 - US_MARKET: 미증시 마감 내용 (사용자가 직접 타이핑한 것만)
+- INDICATOR: 시장 지표 (야간선물, VIX, SOX 등 수치 그대로 유지)
 - AUTO: 태그 없이 들어온 일반 기사 (섹터를 네가 판단해서 분류)
 
 규칙:
 1. SECTOR 태그가 있으면 → 반드시 그 섹터명 그대로 📌Sector 아래 ✔️섹터명 으로 표시
-2. KOSPI 태그가 있으면 → 반드시 📌코스피 칸에만 표시. 섹터 칸에 절대 넣지 말 것. 기사 내용이 아무리 풍부해도 섹터 생성 금지.
-3. KOSDAQ 태그가 있으면 → 반드시 📌코스닥 칸에만 표시. 섹터 칸에 절대 넣지 말 것. 기사 내용이 아무리 풍부해도 섹터 생성 금지.
+2. KOSPI 태그가 있으면 → 반드시 📌코스피 칸에만 표시. 섹터 칸에 절대 넣지 말 것.
+3. KOSDAQ 태그가 있으면 → 반드시 📌코스닥 칸에만 표시. 섹터 칸에 절대 넣지 말 것.
 4. US_MARKET 태그가 있으면 → 📌美증시 마감 칸에 표시
 5. US_MARKET 태그가 하나도 없으면 → 📌美증시 마감 섹션 절대 생성하지 말 것.
-6. AUTO 태그 내용은 네가 섹터 판단해서 분류
-7. ** 볼드 표시 절대 금지
-8. 섹터 중분류는 ✔️ 사용
-9. 기사에 언급된 종목은 해당 섹터 안 "관련 종목:" 줄에만. 코스피/코스닥 칸에 중복 금지.
-10. 최종 출력은 하나의 체크포인트로 통합
-11. KOSPI/KOSDAQ 태그로 들어온 내용은 절대로 섹터로 승격하거나 섹터를 추가로 만들지 말 것.
-12. 각 섹터(✔️)의 불릿은 반드시 최대 2개. 핵심만. 절대 3개 이상 쓰지 말 것.
+6. INDICATOR 태그가 있으면 → 📌지표 섹션으로 체크포인트 맨 위(날짜 헤더 바로 아래)에 배치. 수치 절대 수정하지 말 것.
+7. INDICATOR 태그가 없으면 → 📌지표 섹션 생성하지 말 것.
+8. AUTO 태그 내용은 네가 섹터 판단해서 분류
+9. ** 볼드 표시 절대 금지
+10. 섹터 중분류는 ✔️ 사용
+11. 기사에 언급된 종목은 해당 섹터 안 "관련 종목:" 줄에만. 코스피/코스닥 칸에 중복 금지.
+12. 최종 출력은 하나의 체크포인트로 통합
+13. KOSPI/KOSDAQ 태그로 들어온 내용은 절대로 섹터로 승격하거나 섹터를 추가로 만들지 말 것.
+14. 각 섹터(✔️)의 불릿은 반드시 최대 2개. 핵심만. 절대 3개 이상 쓰지 말 것.
 
 출력 형식:
-
 {날짜} Check Point✨
+
+📌지표
+[INDICATOR 내용. 없으면 이 섹션 통째로 생략]
 
 📌美증시 마감
 [US_MARKET 태그 내용만. 없으면 이 섹션 통째로 생략]
@@ -151,9 +192,13 @@ EDIT_PROMPT = """너는 체크포인트 문서를 수정하는 어시스턴트�
 4. 수정 지시가 없는 부분은 절대 건드리지 말 것
 5. 전체 체크포인트를 그대로 출력 (수정된 부분 포함)"""
 
-
 def parse_user_tag(text: str):
-    """사용자 태그 추출"""
+    """사용자 태그 추출 — 지표/ 태그 추가"""
+    # 지표 태그
+    if re.match(r"^지표\s*/\s*", text, re.IGNORECASE):
+        content = re.sub(r"^지표\s*/\s*", "", text, flags=re.IGNORECASE).strip()
+        return "INDICATOR", "", content
+
     sector_match = re.match(r"^섹터\s*/\s*(.+?)[\n\r]", text + "\n", re.IGNORECASE)
     if sector_match:
         return "SECTOR", sector_match.group(1).strip(), text[sector_match.end():].strip()
@@ -173,36 +218,38 @@ def parse_user_tag(text: str):
 
     return "AUTO", "", text
 
-
 def format_buffer_for_claude(buffer: list) -> str:
     parts = []
-    us_market_lines = []  # 미증시 내용 누적
+    us_market_lines = []
+    indicator_lines = []
 
     for item in buffer:
         tag_type, tag_value, content = item
         if tag_type == "US_MARKET":
             us_market_lines.append(content.strip())
+        elif tag_type == "INDICATOR":
+            indicator_lines.append(content.strip())
         elif tag_type == "SECTOR":
             parts.append(f"[SECTOR: {tag_value}]\n{content}")
         elif tag_type == "AUTO":
             parts.append(f"[AUTO]\n{content}")
-        # KOSPI/KOSDAQ은 여기서 처리 안 함 (코드에서 직접)
 
-    # 미증시 내용 하나로 합쳐서 앞에 추가
+    # 지표 섹션 맨 앞에
+    if indicator_lines:
+        combined_indicator = "\n".join(indicator_lines)
+        parts.insert(0, f"[INDICATOR]\n{combined_indicator}")
+
     if us_market_lines:
         combined_us = "\n".join(us_market_lines)
-        parts.insert(0, f"[US_MARKET]\n{combined_us}")
+        parts.insert(1 if indicator_lines else 0, f"[US_MARKET]\n{combined_us}")
 
     return "\n\n---\n\n".join(parts)
 
-
 async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = None) -> str:
-    """체크포인트 생성. KOSPI/KOSDAQ은 코드에서 직접 처리, Claude는 SECTOR/AUTO/US_MARKET만 담당."""
-
-    # KOSPI/KOSDAQ 항목은 코드에서 직접 분리
+    """체크포인트 생성. KOSPI/KOSDAQ은 코드에서 직접 처리."""
     claude_buffer = []
-    kospi_items = []   # [(종목명, 내용), ...]
-    kosdaq_items = []  # [(종목명, 내용), ...]
+    kospi_items = []
+    kosdaq_items = []
 
     for item in buffer:
         tag_type, tag_value, content = item
@@ -213,13 +260,9 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         else:
             claude_buffer.append(item)
 
-    # Claude에게는 SECTOR/AUTO/US_MARKET만 넘김
     if claude_buffer or prev_checkpoint:
         structured = format_buffer_for_claude(claude_buffer)
-
         if prev_checkpoint:
-            # 기존 체크포인트에서 코스피/코스닥 섹션 제거 후 Claude에게 넘김
-            # (코스피/코스닥은 아래에서 코드로 직접 붙임)
             cp_without_kospi_kosdaq = re.split(r"\n📌코스피", prev_checkpoint)[0]
             user_content = (
                 f"날짜: {date_str}\n\n기존 체크포인트 (📌코스피/코스닥 섹션 제외):\n{cp_without_kospi_kosdaq}\n\n"
@@ -228,7 +271,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         else:
             user_content = (
                 f"날짜: {date_str}\n\n{structured}\n\n"
-                f"※ 📌코스피/📌코스닥 섹션은 출력하지 말 것. Sector와 美증시만 출력."
+                f"※ 📌코스피/📌코스닥 섹션은 출력하지 말 것. Sector와 美증시와 지표만 출력."
                 if structured.strip() else f"날짜: {date_str}"
             )
 
@@ -240,17 +283,14 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         )
         base = response.content[0].text.strip()
     else:
-        # Claude에게 넘길 내용이 없으면 날짜 헤더만
         base = f"{date_str} Check Point✨"
 
-    # 기존 체크포인트의 코스피/코스닥 항목 파싱해서 종목별로 저장
-    # { 종목명: [불릿라인, ...] }
+    # 기존 코스피/코스닥 파싱
     existing_kospi_map = {}
     existing_kosdaq_map = {}
 
     if prev_checkpoint:
         def parse_stock_section(section_text: str) -> dict:
-            """코스피/코스닥 섹션에서 종목별 내용 파싱"""
             result = {}
             current_name = None
             current_lines = []
@@ -278,7 +318,6 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
             existing_kosdaq_map = parse_stock_section(kosdaq_m.group(1))
 
     def summarize_content(content: str) -> list:
-        """기사 내용에서 핵심 불릿 추출 - 간결하게 최대 3개, 중복 제거"""
         content = content.replace("[기사내용]", "").strip()
         seen = set()
         lines = []
@@ -288,49 +327,42 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
                 continue
             if l.startswith("http"):
                 continue
-            # 쓸모없는 줄 필터
             skip_keywords = ["기자 구독", "구독하기", "Forwarded from", "today at",
                              "naver.com", "hankyung.com", "zdnet", "2026.0", "2025.0",
                              "글자크기", "기사 스크랩", "스크랩", "인쇄", "공유", "댓글",
                              "로그인", "회원가입", "뒤로가기", "font", "Font"]
             if any(skip in l for skip in skip_keywords):
                 continue
-            # 한글이 없는 짧은 줄 (폰트명, 코드 등) 제거
-            korean_chars = sum(1 for c in l if '\uac00' <= c <= '\ud7a3')
+            korean_chars = sum(1 for c in l if '\uAC00' <= c <= '\uD7A3')
             if korean_chars < 2 and len(l) < 20:
                 continue
-            # 중복 제거
             key = l.replace("-", "").strip()
             if key in seen:
                 continue
             seen.add(key)
             lines.append(l)
-
         bullets = [l for l in lines if len(l) > 5][:2]
         return [f"- {b}" if not b.startswith("-") else b for b in bullets]
 
-    # 새 KOSPI/KOSDAQ 항목을 기존 맵에 병합 (종목명 기준으로 덮어쓰기)
     for name, content in kospi_items:
         existing_kospi_map[name] = summarize_content(content)
     for name, content in kosdaq_items:
         existing_kosdaq_map[name] = summarize_content(content)
 
-    # 코스피/코스닥 블록 생성
     def build_stock_block(header: str, stock_map: dict) -> str:
         if not stock_map:
             return ""
-        lines_out = [header]  # 헤더 다음 빈 줄 없음
+        lines_out = [header]
         items = []
         for name, bullets in stock_map.items():
             item_lines = [name] + bullets
             items.append("\n".join(item_lines))
-        lines_out.append("\n\n".join(items))  # 종목 사이 빈 줄
+        lines_out.append("\n\n".join(items))
         return "\n".join(lines_out)
 
     kospi_block = build_stock_block("📌코스피", existing_kospi_map)
     kosdaq_block = build_stock_block("📌코스닥", existing_kosdaq_map)
 
-    # 최종 조합 - 섹션 사이 빈 줄 두 개
     result = base.strip()
     if kospi_block:
         result += "\n\n" + kospi_block
@@ -339,9 +371,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
 
     return result.strip()
 
-
 async def apply_partial_edit(checkpoint: str, edit_type: str, target: str, new_content: str) -> str:
-    """부분수정: Claude에게 특정 항목만 수정 요청"""
     if edit_type == "섹터":
         instruction = f"📌Sector 아래 ✔️{target} 섹션의 내용을 아래로 교체해줘:\n{new_content}"
     elif edit_type == "코스피":
@@ -350,6 +380,8 @@ async def apply_partial_edit(checkpoint: str, edit_type: str, target: str, new_c
         instruction = f"📌코스닥 아래 '{target}' 항목의 내용을 아래로 교체해줘:\n{new_content}"
     elif edit_type == "미증시":
         instruction = f"📌美증시 마감 섹션 내용을 아래로 교체해줘:\n{new_content}"
+    elif edit_type == "지표":
+        instruction = f"📌지표 섹션 내용을 아래로 교체해줘:\n{new_content}"
     else:
         instruction = f"'{target}' 항목을 찾아서 내용을 아래로 교체해줘:\n{new_content}"
 
@@ -364,10 +396,9 @@ async def apply_partial_edit(checkpoint: str, edit_type: str, target: str, new_c
     )
     return response.content[0].text
 
-
+# ── 메시지 핸들러 ─────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     if ALLOWED_USER_ID != 0 and user_id != ALLOWED_USER_ID:
         await update.message.reply_text("접근 권한이 없습니다.")
         return
@@ -385,14 +416,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if new_session_match:
         date_str = new_session_match.group(1)
-        user_state[user_id] = {"date": date_str, "buffer": [], "last_checkpoint": None}
+        user_state[user_id] = {"date": date_str, "buffer": [], "last_checkpoint": None, "pending_tag": None}
         await update.message.reply_text(
             f"📅 {date_str} 체크포인트 새로 시작!\n"
             f"태그 예시:\n"
             f"섹터/폴더블 + 기사내용\n"
             f"코스닥/아크릴 + 기사내용\n"
+            f"지표/\nSOX +1.34%\nVIX 23.95 -1.45%\n야간선물 +3.2%\n"
             f"수정/코스피/LG디스플레이 + 수정내용\n"
-            f"전체수정 + 체크포인트 전문"
+            f"전체수정 + 체크포인트 전문\n"
+            f"📸 지표 캡쳐 이미지 전송도 가능!"
         )
         return
 
@@ -402,41 +435,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not new_checkpoint:
             await update.message.reply_text("전체수정 뒤에 체크포인트 내용을 붙여주세요!")
             return
-
         if user_id not in user_state:
             today = datetime.now().strftime("%-m/%-d")
-            user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None}
-
+            user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None, "pending_tag": None}
         user_state[user_id]["last_checkpoint"] = new_checkpoint
         user_state[user_id]["buffer"] = []
-
-        # 날짜 자동 추출
         date_match = re.search(r"(\d{1,2}/\d{1,2})", new_checkpoint)
         if date_match:
             user_state[user_id]["date"] = date_match.group(1)
-
         await update.message.reply_text(
             "✅ 전체수정 완료! 이 내용을 베이스로 추가 기사 쌓을게요.\n\n" + new_checkpoint
         )
         return
 
-    # ── 3) 부분수정: "수정/코스피/LG디스플레이\n내용" ──
+    # ── 3) 부분수정 ──
     edit_match = re.match(r"^수정\s*/\s*(.+?)\s*/\s*(.+?)[\n\r](.*)", text, re.DOTALL)
     if edit_match:
-        edit_type = edit_match.group(1).strip()   # 코스피, 코스닥, 섹터, 미증시
-        target = edit_match.group(2).strip()       # 종목명 또는 섹터명
-        new_content = edit_match.group(3).strip()  # 새 내용
-
+        edit_type = edit_match.group(1).strip()
+        target = edit_match.group(2).strip()
+        new_content = edit_match.group(3).strip()
         state = user_state.get(user_id)
         if not state or not state.get("last_checkpoint"):
             await update.message.reply_text("수정할 체크포인트가 없어요! 먼저 체크포인트를 만들어 주세요.")
             return
-
         processing_msg = await update.message.reply_text(f"⏳ {edit_type}/{target} 수정 중...")
         try:
-            result = await apply_partial_edit(
-                state["last_checkpoint"], edit_type, target, new_content
-            )
+            result = await apply_partial_edit(state["last_checkpoint"], edit_type, target, new_content)
             user_state[user_id]["last_checkpoint"] = result
             await processing_msg.delete()
             await update.message.reply_text("✅ 수정 완료!\n\n" + result)
@@ -448,13 +472,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── 4) 정리 요청 ──
     trigger_words = ["정리해줘", "정리해", "정리 해줘", "뽑아줘"]
     is_trigger = any(word in text for word in trigger_words)
-
     if is_trigger:
         state = user_state.get(user_id)
         if not state or not state["buffer"]:
             await update.message.reply_text("아직 받은 내용이 없어요! 기사나 뉴스를 먼저 보내주세요 📋")
             return
-
         processing_msg = await update.message.reply_text("⏳ 통합 정리 중...")
         try:
             date_str = state.get("date", datetime.now().strftime("%-m/%-d"))
@@ -465,7 +487,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             user_state[user_id]["last_checkpoint"] = result
             user_state[user_id]["buffer"] = []
-
             await processing_msg.delete()
             await update.message.reply_text(result)
         except Exception as e:
@@ -473,7 +494,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
         return
 
-    # ── 5) 일반 내용 → 버퍼에 쌓기 ──
+    # ── 5) 이미지 확인 응답 ("확인" or "맞아" 등) ──
+    confirm_words = ["확인", "맞아", "맞아요", "저장", "ok", "OK", "ㅇㅋ"]
+    state = user_state.get(user_id, {})
+    pending_indicator = state.get("pending_indicator_image")
+
+    if pending_indicator and any(w in text for w in confirm_words):
+        if user_id not in user_state:
+            today = datetime.now().strftime("%-m/%-d")
+            user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None, "pending_tag": None}
+        user_state[user_id]["buffer"].append(("INDICATOR", "", pending_indicator))
+        user_state[user_id]["pending_indicator_image"] = None
+        count = len(user_state[user_id]["buffer"])
+        is_append = bool(user_state[user_id].get("last_checkpoint"))
+        mode = "추가" if is_append else "누적"
+        await update.message.reply_text(
+            f"✅ 📌지표 저장 완료! ({count}개 {mode}) '정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
+        )
+        return
+
+    # 이미지 대기 중인데 다른 텍스트가 들어오면 취소
+    if pending_indicator:
+        user_state[user_id]["pending_indicator_image"] = None
+
+    # ── 6) 일반 내용 → 버퍼에 쌓기 ──
     if len(text) < 5:
         return
 
@@ -481,10 +525,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         today = datetime.now().strftime("%-m/%-d")
         user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None, "pending_tag": None}
 
-    # pending_tag 확인: 직전 메시지가 태그만 단독으로 온 경우
     pending = user_state[user_id].get("pending_tag")
 
-    # URL이 포함된 경우 크롤링 시도
     has_url = bool(extract_urls(text))
     if has_url:
         processing_msg = await update.message.reply_text("🔍 링크 읽는 중...")
@@ -493,19 +535,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         enriched_text = text
 
-    # pending_tag가 있으면 → 이 메시지는 그 태그의 내용으로 자동 묶기
     if pending:
         tag_type, tag_value = pending
         content = enriched_text
-        user_state[user_id]["pending_tag"] = None  # 소비
+        user_state[user_id]["pending_tag"] = None
         user_state[user_id]["buffer"].append((tag_type, tag_value, content))
         count = len(user_state[user_id]["buffer"])
-
         tag_display = {
             "SECTOR": f"✔️섹터/{tag_value}",
             "KOSPI": f"📌코스피/{tag_value}",
             "KOSDAQ": f"📌코스닥/{tag_value}",
             "US_MARKET": "📌美증시 마감",
+            "INDICATOR": "📌지표",
         }
         label = tag_display.get(tag_type, tag_value)
         is_append = bool(user_state[user_id].get("last_checkpoint"))
@@ -517,7 +558,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     tag_type, tag_value, content = parse_user_tag(enriched_text)
 
-    # 태그만 단독으로 온 경우 (내용 없음) → pending_tag로 저장
     is_tag_only = (
         tag_type in ("SECTOR", "KOSPI", "KOSDAQ") and
         not content.strip()
@@ -535,25 +575,67 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 일반 처리
     user_state[user_id]["buffer"].append((tag_type, tag_value, content))
     user_state[user_id]["pending_tag"] = None
     count = len(user_state[user_id]["buffer"])
-
     tag_display = {
         "SECTOR": f"✔️섹터/{tag_value}",
         "KOSPI": f"📌코스피/{tag_value}",
         "KOSDAQ": f"📌코스닥/{tag_value}",
         "US_MARKET": "📌美증시 마감",
+        "INDICATOR": "📌지표",
         "AUTO": "🔍자동분류",
     }
     label = tag_display.get(tag_type, "")
     is_append = bool(user_state[user_id].get("last_checkpoint"))
     mode = "추가" if is_append else "누적"
-
     await update.message.reply_text(
         f"✅ {label} ({count}개 {mode}) '정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
     )
+
+
+# ── 이미지 핸들러 ─────────────────────────────────────────
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """이미지 수신 → Claude Vision으로 지표 추출 → 확인 요청"""
+    user_id = update.effective_user.id
+    if ALLOWED_USER_ID != 0 and user_id != ALLOWED_USER_ID:
+        return
+
+    processing_msg = await update.message.reply_text("📸 이미지 읽는 중...")
+
+    try:
+        # 가장 큰 해상도 사진 선택
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+
+        # 이미지 다운로드
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file.file_path) as resp:
+                image_bytes = await resp.read()
+
+        # Claude Vision으로 지표 추출
+        extracted = await extract_indicators_from_image(image_bytes, "image/jpeg")
+
+        if not extracted:
+            await processing_msg.edit_text("❌ 이미지에서 지표를 읽지 못했어요. 다시 시도해주세요.")
+            return
+
+        # 확인 대기 상태로 저장
+        if user_id not in user_state:
+            today = datetime.now().strftime("%-m/%-d")
+            user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None, "pending_tag": None}
+
+        user_state[user_id]["pending_indicator_image"] = extracted
+
+        await processing_msg.delete()
+        await update.message.reply_text(
+            f"📊 읽은 지표예요. 맞으면 '확인', 틀리면 수정해서 보내주세요:\n\n"
+            f"📌지표\n{extracted}"
+        )
+
+    except Exception as e:
+        logger.error(f"이미지 처리 오류: {e}")
+        await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
 
 
 HELP_TEXT = """📋 CheckPoint Bot 명령어
@@ -568,6 +650,17 @@ HELP_TEXT = """📋 CheckPoint Bot 명령어
 태그 없이 붙여넣기 → 자동분류
 다우/나스닥 포함 텍스트 → 美증시 마감
 
+📊 지표 입력 (텍스트)
+지표/
+SOX +1.34%
+VIX 23.95 -1.45%
+EWY +6.38%
+WTI 90.70 +2.92%
+야간선물 +3.2%
+
+📸 지표 입력 (이미지)
+캡쳐 이미지 전송 → 자동 인식 → '확인'으로 저장
+
 ✅ 정리
 정리해줘
 
@@ -575,27 +668,25 @@ HELP_TEXT = """📋 CheckPoint Bot 명령어
 수정/코스피/LG디스플레이
 - 새내용
 
+수정/지표/
+새 지표 내용
+
 🔄 전체수정
 전체수정
 3/16 Check Point✨
-📌美증시 마감
-...전체내용...
-
-💡 부분수정·전체수정 후에도
-수정본이 베이스가 되어 계속 쌓임"""
-
+...전체내용..."""
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP_TEXT)
 
-
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("help", help_command))
+    # 이미지 핸들러 추가
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("🚀 CheckPoint Bot 시작!")
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
