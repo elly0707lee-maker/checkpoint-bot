@@ -123,6 +123,61 @@ async def extract_indicators_from_image(image_bytes: bytes, mime_type: str = "im
         logger.error(f"이미지 분석 오류: {e}")
         return None
 
+
+async def extract_sector_content_from_image(
+    image_bytes: bytes,
+    tag_type: str,
+    tag_value: str,
+    mime_type: str = "image/jpeg"
+) -> str | None:
+    """섹터/코스피/코스닥 태그가 걸린 상태에서 이미지를 받으면
+    종목명·현재가·등락률을 추출해 섹터 기사 형식 텍스트로 반환"""
+    try:
+        image_data = base64.standard_b64encode(image_bytes).decode("utf-8")
+
+        if tag_type == "SECTOR":
+            context = f"'{tag_value}' 섹터 관련 종목 화면"
+        elif tag_type == "KOSPI":
+            context = f"코스피 종목 '{tag_value}' 관련 화면"
+        elif tag_type == "KOSDAQ":
+            context = f"코스닥 종목 '{tag_value}' 관련 화면"
+        else:
+            context = "시장 화면"
+
+        prompt = (
+            f"이 이미지는 {context}야.\n"
+            "이미지에 보이는 종목명(또는 티커)과 현재가, 등락률을 모두 추출해줘.\n"
+            "형식: 종목명(티커) 현재가 (등락률)\n"
+            "예시:\n"
+            "KDEF 56.25 USD (+6.68%)\n"
+            "한화에어로스페이스 85,400원 (+3.21%)\n\n"
+            "수치가 없으면 종목명만 적어도 됨.\n"
+            "설명·부연 없이 수치 목록만 나열할 것."
+        )
+
+        response = client.messages.create(
+            model="claude-opus-4-20250514",
+            max_tokens=500,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": mime_type,
+                            "data": image_data,
+                        },
+                    },
+                    {"type": "text", "text": prompt}
+                ],
+            }]
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        logger.error(f"섹터 이미지 분석 오류: {e}")
+        return None
+
 # ── 사용자별 상태 저장 ────────────────────────────────────
 # { user_id: { "date": "3/13", "buffer": [...], "last_checkpoint": "...",
 #              "pending_tag": (tag_type, tag_value),
@@ -574,11 +629,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── 이미지 핸들러 ─────────────────────────────────────────
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """이미지 수신 → Claude Vision으로 지표 추출 → 즉시 버퍼 저장"""
+    """이미지 수신 → pending 태그 유무에 따라 분기
+    - pending 태그 없음: 지표(INDICATOR)로 추출
+    - pending 태그 있음(SECTOR/KOSPI/KOSDAQ): 종목·수치 추출 후 해당 태그로 저장
+    """
     user_id = update.effective_user.id
     if ALLOWED_USER_ID != 0 and user_id != ALLOWED_USER_ID:
         return
 
+    if user_id not in user_state:
+        today = datetime.now().strftime("%-m/%-d")
+        user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None, "pending_tag": None}
+
+    pending = user_state[user_id].get("pending_tag")
     processing_msg = await update.message.reply_text("📸 이미지 읽는 중...")
 
     try:
@@ -589,28 +652,54 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with session.get(file.file_path) as resp:
                 image_bytes = await resp.read()
 
-        extracted = await extract_indicators_from_image(image_bytes, "image/jpeg")
+        # ── 분기: pending 태그가 있으면 섹터/종목 내용 추출 ──
+        if pending and pending[0] in ("SECTOR", "KOSPI", "KOSDAQ"):
+            tag_type, tag_value = pending
+            extracted = await extract_sector_content_from_image(image_bytes, tag_type, tag_value, "image/jpeg")
 
-        if not extracted:
-            await processing_msg.edit_text("❌ 이미지에서 지표를 읽지 못했어요. 다시 시도해주세요.")
-            return
+            if not extracted:
+                await processing_msg.edit_text("❌ 이미지에서 내용을 읽지 못했어요. 다시 시도해주세요.")
+                return
 
-        # 확인 없이 즉시 버퍼에 저장
-        if user_id not in user_state:
-            today = datetime.now().strftime("%-m/%-d")
-            user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None, "pending_tag": None}
+            user_state[user_id]["buffer"].append((tag_type, tag_value, extracted))
+            user_state[user_id]["pending_tag"] = None
+            count = len(user_state[user_id]["buffer"])
+            is_append = bool(user_state[user_id].get("last_checkpoint"))
+            mode = "추가" if is_append else "누적"
 
-        user_state[user_id]["buffer"].append(("INDICATOR", "", extracted))
-        count = len(user_state[user_id]["buffer"])
-        is_append = bool(user_state[user_id].get("last_checkpoint"))
-        mode = "추가" if is_append else "누적"
+            tag_display = {
+                "SECTOR": f"✔️섹터/{tag_value}",
+                "KOSPI": f"📌코스피/{tag_value}",
+                "KOSDAQ": f"📌코스닥/{tag_value}",
+            }
+            label = tag_display.get(tag_type, tag_value)
 
-        await processing_msg.delete()
-        await update.message.reply_text(
-            f"✅ 📌지표 저장 완료! ({count}개 {mode})\n\n"
-            f"📌지표\n{extracted}\n\n"
-            f"'정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
-        )
+            await processing_msg.delete()
+            await update.message.reply_text(
+                f"✅ {label} 이미지 저장 완료! ({count}개 {mode})\n\n"
+                f"📷 인식 결과:\n{extracted}\n\n"
+                f"'정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
+            )
+
+        # ── 기본: pending 태그 없으면 지표 추출 ──
+        else:
+            extracted = await extract_indicators_from_image(image_bytes, "image/jpeg")
+
+            if not extracted:
+                await processing_msg.edit_text("❌ 이미지에서 지표를 읽지 못했어요. 다시 시도해주세요.")
+                return
+
+            user_state[user_id]["buffer"].append(("INDICATOR", "", extracted))
+            count = len(user_state[user_id]["buffer"])
+            is_append = bool(user_state[user_id].get("last_checkpoint"))
+            mode = "추가" if is_append else "누적"
+
+            await processing_msg.delete()
+            await update.message.reply_text(
+                f"✅ 📌지표 저장 완료! ({count}개 {mode})\n\n"
+                f"📌지표\n{extracted}\n\n"
+                f"'정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
+            )
 
     except Exception as e:
         logger.error(f"이미지 처리 오류: {e}")
@@ -637,8 +726,11 @@ EWY +6.38%
 WTI 90.70 +2.92%
 야간선물 +3.2%
 
-📸 지표 입력 (이미지)
-캡쳐 이미지 전송 → 자동 인식 → '확인'으로 저장
+📸 이미지 입력
+태그 없이 이미지 → 지표(INDICATOR)로 인식
+섹터/방산 후 이미지 → ✔️방산 칸에 종목·수치 저장
+코스피/한화에어로 후 이미지 → 📌코스피 칸에 저장
+코스닥/이수페타시스 후 이미지 → 📌코스닥 칸에 저장
 
 ✅ 정리
 정리해줘
