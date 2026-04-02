@@ -641,7 +641,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         today = datetime.now().strftime("%-m/%-d")
         user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None, "pending_tag": None}
 
-    pending = user_state[user_id].get("pending_tag")
+    # 캡션에 태그가 있으면 우선 적용 (예: 캡션 = "섹터/방산")
+    caption = (update.message.caption or "").strip()
+    if caption:
+        cap_type, cap_value, _ = parse_user_tag(caption)
+        if cap_type in ("SECTOR", "KOSPI", "KOSDAQ"):
+            pending = (cap_type, cap_value)
+        else:
+            pending = user_state[user_id].get("pending_tag")
+    else:
+        pending = user_state[user_id].get("pending_tag")
+
     processing_msg = await update.message.reply_text("📸 이미지 읽는 중...")
 
     try:
