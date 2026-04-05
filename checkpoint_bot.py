@@ -769,7 +769,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = (update.message.caption or "").strip()
     if caption:
         cap_type, cap_value, _ = parse_user_tag(caption)
-        if cap_type in ("SECTOR", "KOSPI", "KOSDAQ"):
+        if cap_type in ("SECTOR", "KOSPI", "KOSDAQ", "NXT", "AFTER_MARKET"):
             pending = (cap_type, cap_value)
         else:
             pending = user_state[user_id].get("pending_tag")
