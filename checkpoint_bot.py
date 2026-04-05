@@ -135,25 +135,36 @@ async def extract_sector_content_from_image(
     try:
         image_data = base64.standard_b64encode(image_bytes).decode("utf-8")
 
-        if tag_type == "SECTOR":
-            context = f"'{tag_value}' 섹터 관련 종목 화면"
-        elif tag_type == "KOSPI":
-            context = f"코스피 종목 '{tag_value}' 관련 화면"
-        elif tag_type == "KOSDAQ":
-            context = f"코스닥 종목 '{tag_value}' 관련 화면"
+        if tag_type == "NXT":
+            prompt = (
+                "이 이미지는 NXT 괴리율 표야.\n"
+                "표에서 종목명, KRX 종가, NXT 종가, 괴리율(%), 이유를 모두 추출해줘.\n"
+                "형식: 종목명 KRX가 NXT가 괴리율% [이유]\n"
+                "예시:\n"
+                "넥스틸 12,290 14,420 +17.33% [걸프 송유관 수출 기대]\n"
+                "한올바이오파마 54,400 44,050 -19.03%\n\n"
+                "이유 없으면 괄호 생략. 설명 없이 목록만 나열."
+            )
         else:
-            context = "시장 화면"
+            if tag_type == "SECTOR":
+                context = f"'{tag_value}' 섹터 관련 종목 화면"
+            elif tag_type == "KOSPI":
+                context = f"코스피 종목 '{tag_value}' 관련 화면"
+            elif tag_type == "KOSDAQ":
+                context = f"코스닥 종목 '{tag_value}' 관련 화면"
+            else:
+                context = "시장 화면"
 
-        prompt = (
-            f"이 이미지는 {context}야.\n"
-            "이미지에 보이는 종목명(또는 티커)과 현재가, 등락률을 모두 추출해줘.\n"
-            "형식: 종목명(티커) 현재가 (등락률)\n"
-            "예시:\n"
-            "KDEF 56.25 USD (+6.68%)\n"
-            "한화에어로스페이스 85,400원 (+3.21%)\n\n"
-            "수치가 없으면 종목명만 적어도 됨.\n"
-            "설명·부연 없이 수치 목록만 나열할 것."
-        )
+            prompt = (
+                f"이 이미지는 {context}야.\n"
+                "이미지에 보이는 종목명(또는 티커)과 현재가, 등락률을 모두 추출해줘.\n"
+                "형식: 종목명(티커) 현재가 (등락률)\n"
+                "예시:\n"
+                "KDEF 56.25 USD (+6.68%)\n"
+                "한화에어로스페이스 85,400원 (+3.21%)\n\n"
+                "수치가 없으면 종목명만 적어도 됨.\n"
+                "설명·부연 없이 수치 목록만 나열할 것."
+            )
 
         response = client.messages.create(
             model="claude-opus-4-20250514",
@@ -248,6 +259,74 @@ EDIT_PROMPT = """너는 체크포인트 문서를 수정하는 어시스턴트�
 4. 수정 지시가 없는 부분은 절대 건드리지 말 것
 5. 전체 체크포인트를 그대로 출력 (수정된 부분 포함)"""
 
+AFTER_MARKET_PROMPT = """너는 시간외 특이종목 데이터를 체크포인트용으로 요약하는 어시스턴트야.
+
+규칙:
+1. ** 볼드 표시 절대 금지
+2. 같은 이슈/테마로 움직이는 종목은 하나의 ✔️ 항목으로 묶을 것
+3. 개별 이슈 종목은 따로 표시
+4. 상승/하락 구분해서 정리
+5. 각 ✔️ 항목의 불릿은 최대 2개
+6. 핵심 종목만 선별 (전체 나열 금지)
+7. 등락률 반드시 표시
+
+출력 형식:
+📌시간외 특이종목
+
+▶ 상승
+✔️ [테마/이슈명]
+- 핵심 내용 (등락률 포함)
+- 관련 종목: 종목A(+X%), 종목B(+X%)
+
+▶ 하락
+✔️ [테마/이슈명]
+- 핵심 내용"""
+
+NXT_PROMPT = """너는 NXT 괴리율 데이터를 체크포인트용으로 요약하는 어시스턴트야.
+
+규칙:
+1. ** 볼드 표시 절대 금지
+2. 같은 이슈/테마로 움직이는 종목은 묶을 것
+3. 상위(괴리율 양수)/하위(괴리율 음수) 구분
+4. 괴리율 수치 반드시 표시
+5. 이유가 있는 종목 우선 표시
+6. 핵심만 선별 (전체 나열 금지)
+
+출력 형식:
+📌NXT 괴리율
+
+▶ 상위
+✔️ [테마/이슈명]
+- 핵심 내용
+- 관련 종목: 종목A(+X%), 종목B(+X%)
+
+▶ 하위
+✔️ [테마/이슈명]
+- 핵심 내용
+- 관련 종목: 종목A(-X%), 종목B(-X%)"""
+
+
+async def summarize_after_market(content: str) -> str:
+    """시간외 특이종목 데이터를 Claude로 요약"""
+    response = client.messages.create(
+        model="claude-opus-4-20250514",
+        max_tokens=1000,
+        system=AFTER_MARKET_PROMPT,
+        messages=[{"role": "user", "content": content}],
+    )
+    return response.content[0].text.strip()
+
+
+async def summarize_nxt(content: str) -> str:
+    """NXT 괴리율 데이터를 Claude로 요약"""
+    response = client.messages.create(
+        model="claude-opus-4-20250514",
+        max_tokens=1000,
+        system=NXT_PROMPT,
+        messages=[{"role": "user", "content": content}],
+    )
+    return response.content[0].text.strip()
+
 def parse_user_tag(text: str):
     """사용자 태그 추출 — 지표/ 태그 추가"""
     # 지표 태그
@@ -266,6 +345,16 @@ def parse_user_tag(text: str):
     kosdaq_match = re.match(r"^코스닥\s*/\s*(.+?)[\n\r]", text + "\n", re.IGNORECASE)
     if kosdaq_match:
         return "KOSDAQ", kosdaq_match.group(1).strip(), text[kosdaq_match.end():].strip()
+
+    # 시간외 태그
+    if re.match(r"^시간외\s*/\s*", text, re.IGNORECASE):
+        content = re.sub(r"^시간외\s*/\s*", "", text, flags=re.IGNORECASE).strip()
+        return "AFTER_MARKET", "", content
+
+    # NXT 태그
+    if re.match(r"^NXT\s*/\s*", text, re.IGNORECASE):
+        content = re.sub(r"^NXT\s*/\s*", "", text, flags=re.IGNORECASE).strip()
+        return "NXT", "", content
 
     us_keywords = ["다우", "나스닥", "s&p", "S&P", "미증시", "美증시", "뉴욕증시", "월스트리트",
                    "미 증시", "미증시", "미국증시", "미국 증시"]
@@ -302,10 +391,12 @@ def format_buffer_for_claude(buffer: list) -> str:
     return "\n\n---\n\n".join(parts)
 
 async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = None) -> str:
-    """체크포인트 생성. KOSPI/KOSDAQ은 코드에서 직접 처리."""
+    """체크포인트 생성. KOSPI/KOSDAQ/AFTER_MARKET/NXT는 코드에서 직접 처리."""
     claude_buffer = []
     kospi_items = []
     kosdaq_items = []
+    after_market_items = []
+    nxt_items = []
 
     for item in buffer:
         tag_type, tag_value, content = item
@@ -313,16 +404,20 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
             kospi_items.append((tag_value, content))
         elif tag_type == "KOSDAQ":
             kosdaq_items.append((tag_value, content))
+        elif tag_type == "AFTER_MARKET":
+            after_market_items.append(content)
+        elif tag_type == "NXT":
+            nxt_items.append(content)
         else:
             claude_buffer.append(item)
 
     if claude_buffer or prev_checkpoint:
         structured = format_buffer_for_claude(claude_buffer)
         if prev_checkpoint:
-            cp_without_kospi_kosdaq = re.split(r"\n📌코스피", prev_checkpoint)[0]
+            cp_base = re.split(r"\n📌코스피|\n📌시간외|\n📌NXT", prev_checkpoint)[0]
             user_content = (
-                f"날짜: {date_str}\n\n기존 체크포인트 (📌코스피/코스닥 섹션 제외):\n{cp_without_kospi_kosdaq}\n\n"
-                f"---\n\n추가 내용 (반영해서 업데이트해줘. 📌코스피/📌코스닥 섹션은 출력하지 말 것):\n\n{structured}"
+                f"날짜: {date_str}\n\n기존 체크포인트 (📌코스피/코스닥/시간외/NXT 섹션 제외):\n{cp_base}\n\n"
+                f"---\n\n추가 내용 (반영해서 업데이트해줘. 📌코스피/📌코스닥/📌시간외/📌NXT 섹션은 출력하지 말 것):\n\n{structured}"
             )
         else:
             user_content = (
@@ -425,6 +520,27 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
     if kosdaq_block:
         result += "\n\n" + kosdaq_block
 
+    # ── 시간외 특이종목 처리 ──
+    # 새 데이터가 있으면 Claude로 요약, 없으면 기존 prev 섹션 유지
+    if after_market_items:
+        combined_am = "\n\n".join(after_market_items)
+        after_market_block = await summarize_after_market(combined_am)
+        result += "\n\n" + after_market_block
+    elif prev_checkpoint:
+        am_m = re.search(r"(📌시간외 특이종목.*?)(?=\n📌NXT|\n📌코스피|\Z)", prev_checkpoint, re.DOTALL)
+        if am_m:
+            result += "\n\n" + am_m.group(1).strip()
+
+    # ── NXT 괴리율 처리 ──
+    if nxt_items:
+        combined_nxt = "\n\n".join(nxt_items)
+        nxt_block = await summarize_nxt(combined_nxt)
+        result += "\n\n" + nxt_block
+    elif prev_checkpoint:
+        nxt_m = re.search(r"(📌NXT 괴리율.*?)(?=\n📌코스피|\Z)", prev_checkpoint, re.DOTALL)
+        if nxt_m:
+            result += "\n\n" + nxt_m.group(1).strip()
+
     return result.strip()
 
 async def apply_partial_edit(checkpoint: str, edit_type: str, target: str, new_content: str) -> str:
@@ -438,6 +554,10 @@ async def apply_partial_edit(checkpoint: str, edit_type: str, target: str, new_c
         instruction = f"📌美증시 마감 섹션 내용을 아래로 교체해줘:\n{new_content}"
     elif edit_type == "지표":
         instruction = f"📌지표 섹션 내용을 아래로 교체해줘:\n{new_content}"
+    elif edit_type == "시간외":
+        instruction = f"📌시간외 특이종목 섹션 내용을 아래로 교체해줘:\n{new_content}"
+    elif edit_type == "NXT":
+        instruction = f"📌NXT 괴리율 섹션 내용을 아래로 교체해줘:\n{new_content}"
     else:
         instruction = f"'{target}' 항목을 찾아서 내용을 아래로 교체해줘:\n{new_content}"
 
@@ -580,6 +700,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "KOSDAQ": f"📌코스닥/{tag_value}",
             "US_MARKET": "📌美증시 마감",
             "INDICATOR": "📌지표",
+            "AFTER_MARKET": "📌시간외 특이종목",
+            "NXT": "📌NXT 괴리율",
         }
         label = tag_display.get(tag_type, tag_value)
         is_append = bool(user_state[user_id].get("last_checkpoint"))
@@ -617,6 +739,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "KOSDAQ": f"📌코스닥/{tag_value}",
         "US_MARKET": "📌美증시 마감",
         "INDICATOR": "📌지표",
+        "AFTER_MARKET": "📌시간외 특이종목",
+        "NXT": "📌NXT 괴리율",
         "AUTO": "🔍자동분류",
     }
     label = tag_display.get(tag_type, "")
@@ -663,7 +787,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 image_bytes = await resp.read()
 
         # ── 분기: pending 태그가 있으면 섹터/종목 내용 추출 ──
-        if pending and pending[0] in ("SECTOR", "KOSPI", "KOSDAQ"):
+        if pending and pending[0] in ("SECTOR", "KOSPI", "KOSDAQ", "NXT"):
             tag_type, tag_value = pending
             extracted = await extract_sector_content_from_image(image_bytes, tag_type, tag_value, "image/jpeg")
 
@@ -681,6 +805,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "SECTOR": f"✔️섹터/{tag_value}",
                 "KOSPI": f"📌코스피/{tag_value}",
                 "KOSDAQ": f"📌코스닥/{tag_value}",
+                "NXT": "📌NXT 괴리율",
             }
             label = tag_display.get(tag_type, tag_value)
 
@@ -741,6 +866,15 @@ WTI 90.70 +2.92%
 섹터/방산 후 이미지 → ✔️방산 칸에 종목·수치 저장
 코스피/한화에어로 후 이미지 → 📌코스피 칸에 저장
 코스닥/이수페타시스 후 이미지 → 📌코스닥 칸에 저장
+NXT/ 후 이미지 → 📌NXT 괴리율 표 인식 저장
+
+📊 시간외/NXT 입력
+시간외/
+(시간외 특이종목 데이터 붙여넣기)
+
+NXT/
+(NXT 괴리율 텍스트 붙여넣기)
+또는 NXT/ 캡션 달아서 이미지 전송
 
 ✅ 정리
 정리해줘
