@@ -82,6 +82,7 @@ async def enrich_text_with_url(text: str) -> str:
 
 # ── 이미지 → Claude Vision으로 지표 추출 ──────────────────
 async def extract_indicators_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str | None:
+    """이미지에서 시장 지표 수치를 추출해 텍스트로 반환"""
     try:
         image_data = base64.standard_b64encode(image_bytes).decode("utf-8")
         response = client.messages.create(
@@ -129,6 +130,8 @@ async def extract_sector_content_from_image(
     tag_value: str,
     mime_type: str = "image/jpeg"
 ) -> str | None:
+    """섹터/코스피/코스닥 태그가 걸린 상태에서 이미지를 받으면
+    종목명·현재가·등락률을 추출해 섹터 기사 형식 텍스트로 반환"""
     try:
         image_data = base64.standard_b64encode(image_bytes).decode("utf-8")
 
@@ -187,6 +190,9 @@ async def extract_sector_content_from_image(
         return None
 
 # ── 사용자별 상태 저장 ────────────────────────────────────
+# { user_id: { "date": "3/13", "buffer": [...], "last_checkpoint": "...",
+#              "pending_tag": (tag_type, tag_value),
+#              "pending_indicator_image": "텍스트" } }
 user_state = {}
 
 # ── Claude 프롬프트 ────────────────────────────────────────
@@ -301,6 +307,7 @@ NXT_PROMPT = """너는 NXT 괴리율 데이터를 체크포인트용으로 요�
 
 
 async def summarize_after_market(content: str) -> str:
+    """시간외 특이종목 데이터를 Claude로 요약"""
     response = client.messages.create(
         model="claude-opus-4-20250514",
         max_tokens=1000,
@@ -311,6 +318,7 @@ async def summarize_after_market(content: str) -> str:
 
 
 async def summarize_nxt(content: str) -> str:
+    """NXT 괴리율 데이터를 Claude로 요약"""
     response = client.messages.create(
         model="claude-opus-4-20250514",
         max_tokens=1000,
@@ -320,6 +328,8 @@ async def summarize_nxt(content: str) -> str:
     return response.content[0].text.strip()
 
 def parse_user_tag(text: str):
+    """사용자 태그 추출 — 지표/ 태그 추가"""
+    # 지표 태그
     if re.match(r"^지표\s*/\s*", text, re.IGNORECASE):
         content = re.sub(r"^지표\s*/\s*", "", text, flags=re.IGNORECASE).strip()
         return "INDICATOR", "", content
@@ -336,10 +346,12 @@ def parse_user_tag(text: str):
     if kosdaq_match:
         return "KOSDAQ", kosdaq_match.group(1).strip(), text[kosdaq_match.end():].strip()
 
+    # 시간외 태그
     if re.match(r"^시간외\s*/\s*", text, re.IGNORECASE):
         content = re.sub(r"^시간외\s*/\s*", "", text, flags=re.IGNORECASE).strip()
         return "AFTER_MARKET", "", content
 
+    # NXT 태그
     if re.match(r"^NXT\s*/\s*", text, re.IGNORECASE):
         content = re.sub(r"^NXT\s*/\s*", "", text, flags=re.IGNORECASE).strip()
         return "NXT", "", content
@@ -367,6 +379,7 @@ def format_buffer_for_claude(buffer: list) -> str:
         elif tag_type == "AUTO":
             parts.append(f"[AUTO]\n{content}")
 
+    # 지표 섹션 맨 앞에
     if indicator_lines:
         combined_indicator = "\n".join(indicator_lines)
         parts.insert(0, f"[INDICATOR]\n{combined_indicator}")
@@ -378,6 +391,7 @@ def format_buffer_for_claude(buffer: list) -> str:
     return "\n\n---\n\n".join(parts)
 
 async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = None) -> str:
+    """체크포인트 생성. KOSPI/KOSDAQ/AFTER_MARKET/NXT는 코드에서 직접 처리."""
     claude_buffer = []
     kospi_items = []
     kosdaq_items = []
@@ -422,6 +436,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
     else:
         base = f"{date_str} Check Point✨"
 
+    # 기존 코스피/코스닥 파싱
     existing_kospi_map = {}
     existing_kosdaq_map = {}
 
@@ -505,15 +520,18 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
     if kosdaq_block:
         result += "\n\n" + kosdaq_block
 
+    # ── 시간외 특이종목 처리 ──
+    # 새 데이터가 있으면 Claude로 요약, 없으면 기존 prev 섹션 유지
     if after_market_items:
         combined_am = "\n\n".join(after_market_items)
-        after_market_block = await summarize_after_market(combined_am)
+        after_market_block = "📌시간외 특이종목\n\n" + combined_am
         result += "\n\n" + after_market_block
     elif prev_checkpoint:
         am_m = re.search(r"(📌시간외 특이종목.*?)(?=\n📌NXT|\n📌코스피|\Z)", prev_checkpoint, re.DOTALL)
         if am_m:
             result += "\n\n" + am_m.group(1).strip()
 
+    # ── NXT 괴리율 처리 ──
     if nxt_items:
         combined_nxt = "\n\n".join(nxt_items)
         nxt_block = await summarize_nxt(combined_nxt)
@@ -553,27 +571,6 @@ async def apply_partial_edit(checkpoint: str, edit_type: str, target: str, new_c
         }],
     )
     return response.content[0].text
-
-
-# ── 대시보드 전송 ──────────────────────────────────────────
-async def send_to_dashboard(content: str, date: str):
-    """체크포인트를 대시보드로 전송"""
-    dashboard_url = os.environ.get("DASHBOARD_URL", "")
-    api_secret = os.environ.get("API_SECRET", "moneyplus")
-    if not dashboard_url:
-        return
-    try:
-        async with aiohttp.ClientSession() as session:
-            await session.post(
-                f"{dashboard_url}/api/post/checkpoint",
-                headers={"X-API-Secret": api_secret},
-                json={"content": content, "date": date},
-                timeout=aiohttp.ClientTimeout(total=10)
-            )
-        logger.info("대시보드 체크포인트 전송 완료")
-    except Exception as e:
-        logger.warning(f"대시보드 전송 실패: {e}")
-
 
 # ── 메시지 핸들러 ─────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -668,8 +665,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_state[user_id]["buffer"] = []
             await processing_msg.delete()
             await update.message.reply_text(result)
-            # ✅ 대시보드로 자동 전송
-            await send_to_dashboard(result, date_str)
         except Exception as e:
             logger.error(f"분석 오류: {e}")
             await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
@@ -758,6 +753,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── 이미지 핸들러 ─────────────────────────────────────────
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """이미지 수신 → pending 태그 유무에 따라 분기
+    - pending 태그 없음: 지표(INDICATOR)로 추출
+    - pending 태그 있음(SECTOR/KOSPI/KOSDAQ): 종목·수치 추출 후 해당 태그로 저장
+    """
     user_id = update.effective_user.id
     if ALLOWED_USER_ID != 0 and user_id != ALLOWED_USER_ID:
         return
@@ -766,6 +765,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         today = datetime.now().strftime("%-m/%-d")
         user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None, "pending_tag": None}
 
+    # 캡션에 태그가 있으면 우선 적용 (예: 캡션 = "섹터/방산")
     caption = (update.message.caption or "").strip()
     if caption:
         cap_type, cap_value, _ = parse_user_tag(caption)
@@ -786,6 +786,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with session.get(file.file_path) as resp:
                 image_bytes = await resp.read()
 
+        # ── 분기: pending 태그가 있으면 섹터/종목 내용 추출 ──
         if pending and pending[0] in ("SECTOR", "KOSPI", "KOSDAQ", "NXT"):
             tag_type, tag_value = pending
             extracted = await extract_sector_content_from_image(image_bytes, tag_type, tag_value, "image/jpeg")
@@ -815,6 +816,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"'정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
             )
 
+        # ── 기본: pending 태그 없으면 지표 추출 ──
         else:
             extracted = await extract_indicators_from_image(image_bytes, "image/jpeg")
 
@@ -895,6 +897,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("help", help_command))
+    # 이미지 핸들러 추가
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("🚀 CheckPoint Bot 시작!")
