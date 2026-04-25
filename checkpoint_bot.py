@@ -714,7 +714,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tag_type, tag_value, content = parse_user_tag(enriched_text)
 
     is_tag_only = (
-        tag_type in ("SECTOR", "KOSPI", "KOSDAQ") and
+        tag_type in ("SECTOR", "KOSPI", "KOSDAQ", "AFTER_MARKET", "NXT") and
         not content.strip()
     )
     if is_tag_only:
@@ -723,6 +723,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "SECTOR": f"✔️섹터/{tag_value}",
             "KOSPI": f"📌코스피/{tag_value}",
             "KOSDAQ": f"📌코스닥/{tag_value}",
+            "AFTER_MARKET": "📌시간외 특이종목",
+            "NXT": "📌NXT 괴리율",
         }
         label = tag_display.get(tag_type, tag_value)
         await update.message.reply_text(
