@@ -541,13 +541,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         date_match = re.search(r"(\d{1,2}/\d{1,2})", new_checkpoint)
         if date_match:
             user_state[user_id]["date"] = date_match.group(1)
-        # 대시보드 자동 전송
+        # 대시보드 자동 전송 (실패 시에만 알림)
         date_label = user_state[user_id]["date"]
         sent = await send_to_dashboard(new_checkpoint, date_label)
-        dash_msg = "\n📤 대시보드 전송 완료!" if sent else "\n⚠️ 대시보드 전송 실패"
-        await update.message.reply_text(
-            f"✅ 전체수정 완료!{dash_msg}\n\n" + new_checkpoint
-        )
+        if sent:
+            await update.message.reply_text(f"✅ 전체수정 완료!\n\n" + new_checkpoint)
+        else:
+            await update.message.reply_text(f"✅ 전체수정 완료! (⚠️ 대시보드 전송 실패)\n\n" + new_checkpoint)
         return
 
     # ── 3) 부분수정 ──
@@ -565,9 +565,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result = await apply_partial_edit(state["last_checkpoint"], edit_type, target, new_content)
             user_state[user_id]["last_checkpoint"] = result
             sent = await send_to_dashboard(result, state["date"])
-            dash_msg = "\n📤 대시보드 전송 완료!" if sent else "\n⚠️ 대시보드 전송 실패"
             await processing_msg.delete()
-            await update.message.reply_text(f"✅ 수정 완료!{dash_msg}\n\n" + result)
+            if sent:
+                await update.message.reply_text(f"✅ 수정 완료!\n\n" + result)
+            else:
+                await update.message.reply_text(f"✅ 수정 완료! (⚠️ 대시보드 전송 실패)\n\n" + result)
         except Exception as e:
             logger.error(f"수정 오류: {e}")
             await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
@@ -591,11 +593,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             user_state[user_id]["last_checkpoint"] = result
             user_state[user_id]["buffer"] = []
-            # 자동 대시보드 전송
+            # 자동 대시보드 전송 (실패 시에만 알림)
             sent = await send_to_dashboard(result, date_str)
-            dash_msg = "\n📤 대시보드 전송 완료!" if sent else "\n⚠️ 대시보드 전송 실패 (텔레그램만 출력)"
             await processing_msg.delete()
-            await update.message.reply_text(result + dash_msg)
+            if sent:
+                await update.message.reply_text(result)
+            else:
+                await update.message.reply_text(result + "\n\n⚠️ 대시보드 전송 실패")
         except Exception as e:
             logger.error(f"분석 오류: {e}")
             await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
