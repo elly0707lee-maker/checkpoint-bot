@@ -21,6 +21,8 @@ from datetime import datetime
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
+DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "")           # 예: https://yenny.railway.app
+DASHBOARD_API_SECRET = os.environ.get("DASHBOARD_API_SECRET", "moneyplus")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -29,6 +31,32 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# ── 대시보드 전송 ─────────────────────────────────────────
+async def send_to_dashboard(content: str, date_str: str) -> bool:
+    """체크포인트를 대시보드 /api/post/checkpoint 로 전송"""
+    if not DASHBOARD_URL:
+        logger.warning("DASHBOARD_URL 환경변수가 없어요.")
+        return False
+    url = DASHBOARD_URL.rstrip("/") + "/api/post/checkpoint"
+    payload = {"content": content, "date": date_str}
+    headers = {
+        "Content-Type": "application/json",
+        "X-API-Secret": DASHBOARD_API_SECRET,
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    logger.info("대시보드 전송 성공")
+                    return True
+                else:
+                    body = await resp.text()
+                    logger.error(f"대시보드 전송 실패 {resp.status}: {body[:200]}")
+                    return False
+    except Exception as e:
+        logger.error(f"대시보드 전송 오류: {e}")
+        return False
 
 # ── URL 크롤링 ──────────────────────────────────────────
 async def fetch_url_text(url: str) -> str | None:
@@ -693,6 +721,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_state[user_id]["buffer"] = []
             await processing_msg.delete()
             await update.message.reply_text(result)
+            # ── 대시보드 자동 전송 ──
+            ok = await send_to_dashboard(result, date_str)
+            if ok:
+                await update.message.reply_text("✅ 대시보드 전송 완료!")
+            else:
+                await update.message.reply_text("⚠️ 대시보드 전송 실패. DASHBOARD_URL 확인해주세요.")
         except Exception as e:
             logger.error(f"분석 오류: {e}")
             await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
