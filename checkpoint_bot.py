@@ -327,6 +327,34 @@ async def summarize_nxt(content: str) -> str:
     )
     return response.content[0].text.strip()
 
+def parse_multi_tag(text: str) -> list:
+    """한 메시지에 여러 태그 블록이 있을 때 모두 분리해서 반환.
+    단일 태그 메시지도 그대로 동작.
+    반환: [(tag_type, tag_value, content), ...]
+    """
+    TAG_START = re.compile(
+        r"^(섹터|코스피|코스닥|지표|시간외|NXT)\s*/",
+        re.IGNORECASE | re.MULTILINE
+    )
+    matches = list(TAG_START.finditer(text))
+    if not matches:
+        return [parse_user_tag(text)]
+
+    blocks = []
+    # 태그 앞에 내용이 있으면 AUTO로
+    if matches[0].start() > 0:
+        prefix = text[:matches[0].start()].strip()
+        if prefix:
+            blocks.append(("AUTO", "", prefix))
+
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        block_text = text[m.start():end].strip()
+        blocks.append(parse_user_tag(block_text))
+
+    return blocks
+
+
 def parse_user_tag(text: str):
     """사용자 태그 추출 — 지표/ 태그 추가"""
     # 지표 태그
@@ -711,59 +739,63 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    tag_type, tag_value, content = parse_user_tag(enriched_text)
+    parsed_blocks = parse_multi_tag(enriched_text)
 
-    is_tag_only = (
-        tag_type in ("SECTOR", "KOSPI", "KOSDAQ", "AFTER_MARKET", "NXT") and
-        not content.strip()
-    )
-    if is_tag_only:
-        tag_display = {
-            "SECTOR": f"✔️섹터/{tag_value}",
-            "KOSPI": f"📌코스피/{tag_value}",
-            "KOSDAQ": f"📌코스닥/{tag_value}",
-            "AFTER_MARKET": "📌시간외 특이종목",
-            "NXT": "📌NXT 괴리율",
-        }
-        label = tag_display.get(tag_type, tag_value)
+    def get_label(tt, tv):
+        m = {"SECTOR": f"✔️섹터/{tv}", "KOSPI": f"📌코스피/{tv}", "KOSDAQ": f"📌코스닥/{tv}",
+             "US_MARKET": "📌美증시 마감", "INDICATOR": "📌지표",
+             "AFTER_MARKET": "📌시간외 특이종목", "NXT": "📌NXT 괴리율", "AUTO": "🔍자동분류"}
+        return m.get(tt, tv)
 
-        # ── 소급 재태깅: 마지막 버퍼 항목이 AUTO면 바로 재태깅 ──
-        buf = user_state[user_id]["buffer"]
-        if buf and buf[-1][0] == "AUTO":
-            _, _, prev_content = buf[-1]
-            buf[-1] = (tag_type, tag_value, prev_content)
-            count = len(buf)
-            is_append = bool(user_state[user_id].get("last_checkpoint"))
-            mode = "추가" if is_append else "누적"
+    # ── 단일 태그-only → pending or 재태깅 ──
+    if len(parsed_blocks) == 1:
+        tag_type, tag_value, content = parsed_blocks[0]
+        is_tag_only = (
+            tag_type in ("SECTOR", "KOSPI", "KOSDAQ", "AFTER_MARKET", "NXT") and
+            not content.strip()
+        )
+        if is_tag_only:
+            label = get_label(tag_type, tag_value)
+            buf = user_state[user_id]["buffer"]
+            if buf and buf[-1][0] == "AUTO":
+                _, _, prev_content = buf[-1]
+                buf[-1] = (tag_type, tag_value, prev_content)
+                count = len(buf)
+                is_append = bool(user_state[user_id].get("last_checkpoint"))
+                mode = "추가" if is_append else "누적"
+                await update.message.reply_text(
+                    f"✅ 방금 내용을 {label}로 재태깅했어요! ({count}개 {mode})"
+                )
+            else:
+                user_state[user_id]["pending_tag"] = (tag_type, tag_value)
+                await update.message.reply_text(
+                    f"📌 {label} 태그 받았어요! 다음 메시지를 이 태그로 묶을게요 ✅"
+                )
+            return
+
+    # ── 멀티 태그 or 단일 태그+내용 → 전체 버퍼에 추가 ──
+    added_labels = []
+    for tag_type, tag_value, content in parsed_blocks:
+        if not content.strip():
+            continue
+        user_state[user_id]["buffer"].append((tag_type, tag_value, content))
+        added_labels.append(get_label(tag_type, tag_value))
+
+    user_state[user_id]["pending_tag"] = None
+
+    if added_labels:
+        count = len(user_state[user_id]["buffer"])
+        is_append = bool(user_state[user_id].get("last_checkpoint"))
+        mode = "추가" if is_append else "누적"
+        if len(added_labels) == 1:
             await update.message.reply_text(
-                f"✅ 방금 내용을 {label}로 재태깅했어요! ({count}개 {mode})"
+                f"✅ {added_labels[0]} ({count}개 {mode}) '정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
             )
         else:
-            user_state[user_id]["pending_tag"] = (tag_type, tag_value)
+            labels_str = "\n".join(f"  · {l}" for l in added_labels)
             await update.message.reply_text(
-                f"📌 {label} 태그 받았어요! 다음 메시지를 이 태그로 묶을게요 ✅"
+                f"✅ {len(added_labels)}개 태그 한꺼번에 저장! ({count}개 {mode})\n{labels_str}\n\n'정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
             )
-        return
-
-    user_state[user_id]["buffer"].append((tag_type, tag_value, content))
-    user_state[user_id]["pending_tag"] = None
-    count = len(user_state[user_id]["buffer"])
-    tag_display = {
-        "SECTOR": f"✔️섹터/{tag_value}",
-        "KOSPI": f"📌코스피/{tag_value}",
-        "KOSDAQ": f"📌코스닥/{tag_value}",
-        "US_MARKET": "📌美증시 마감",
-        "INDICATOR": "📌지표",
-        "AFTER_MARKET": "📌시간외 특이종목",
-        "NXT": "📌NXT 괴리율",
-        "AUTO": "🔍자동분류",
-    }
-    label = tag_display.get(tag_type, "")
-    is_append = bool(user_state[user_id].get("last_checkpoint"))
-    mode = "추가" if is_append else "누적"
-    await update.message.reply_text(
-        f"✅ {label} ({count}개 {mode}) '정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
-    )
 
 
 # ── 이미지 핸들러 ─────────────────────────────────────────
