@@ -22,7 +22,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
 DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "")           # 예: https://yenny.railway.app
-DASHBOARD_API_SECRET = os.environ.get("DASHBOARD_API_SECRET", "anchoryen")
+DASHBOARD_API_SECRET = os.environ.get("API_SECRET", "anchoryen")  # 대시보드와 동일한 변수 사용
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -33,10 +33,13 @@ logger = logging.getLogger(__name__)
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # ── 대시보드 전송 ─────────────────────────────────────────
+_last_dashboard_error = ""
+
 async def send_to_dashboard(content: str, date_str: str) -> bool:
     """체크포인트를 대시보드 /api/post/checkpoint 로 전송"""
+    global _last_dashboard_error
     if not DASHBOARD_URL:
-        logger.warning("DASHBOARD_URL 환경변수가 없어요.")
+        _last_dashboard_error = "DASHBOARD_URL 미설정"
         return False
     url = DASHBOARD_URL.rstrip("/") + "/api/post/checkpoint"
     payload = {"content": content, "date": date_str}
@@ -47,14 +50,17 @@ async def send_to_dashboard(content: str, date_str: str) -> bool:
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                body = await resp.text()
                 if resp.status == 200:
                     logger.info("대시보드 전송 성공")
+                    _last_dashboard_error = ""
                     return True
                 else:
-                    body = await resp.text()
+                    _last_dashboard_error = f"HTTP {resp.status}: {body[:150]}"
                     logger.error(f"대시보드 전송 실패 {resp.status}: {body[:200]}")
                     return False
     except Exception as e:
+        _last_dashboard_error = f"예외: {str(e)[:150]}"
         logger.error(f"대시보드 전송 오류: {e}")
         return False
 
@@ -726,8 +732,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if ok:
                 await update.message.reply_text("📤 대시보드 전송 OK")
             else:
-                url_val = DASHBOARD_URL or "(미설정)"
-                await update.message.reply_text(f"⚠️ 대시보드 전송 실패\nURL: {url_val}\n로그 확인해주세요.")
+                await update.message.reply_text(f"⚠️ 전송 실패 상세: {_last_dashboard_error}")
         except Exception as e:
             logger.error(f"분석 오류: {e}")
             await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
