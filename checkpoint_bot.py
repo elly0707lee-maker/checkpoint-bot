@@ -724,9 +724,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # ── 대시보드 자동 전송 ──
             ok = await send_to_dashboard(result, date_str)
             if ok:
-                await update.message.reply_text("✅ 대시보드 전송 완료!")
+                await update.message.reply_text("📤 대시보드 전송 OK")
             else:
-                await update.message.reply_text("⚠️ 대시보드 전송 실패. DASHBOARD_URL 확인해주세요.")
+                url_val = DASHBOARD_URL or "(미설정)"
+                await update.message.reply_text(f"⚠️ 대시보드 전송 실패\nURL: {url_val}\n로그 확인해주세요.")
         except Exception as e:
             logger.error(f"분석 오류: {e}")
             await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
