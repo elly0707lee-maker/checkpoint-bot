@@ -22,7 +22,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0"))
 DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "")           # 예: https://yenny.railway.app
-DASHBOARD_API_SECRET = os.environ.get("DASHBOARD_API_SECRET", "moneyplus")
+DASHBOARD_API_SECRET = os.environ.get("DASHBOARD_API_SECRET", "anchoryen")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
