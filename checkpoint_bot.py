@@ -679,11 +679,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_state[user_id]["last_checkpoint"] = new_checkpoint
         user_state[user_id]["buffer"] = []
         date_match = re.search(r"(\d{1,2}/\d{1,2})", new_checkpoint)
+        date_str = date_match.group(1) if date_match else datetime.now().strftime("%-m/%-d")
         if date_match:
-            user_state[user_id]["date"] = date_match.group(1)
-        await update.message.reply_text(
-            "✅ 전체수정 완료! 이 내용을 베이스로 추가 기사 쌓을게요.\n\n" + new_checkpoint
-        )
+            user_state[user_id]["date"] = date_str
+        ok = await send_to_dashboard(new_checkpoint, date_str)
+        status = "📤 대시보드 전송 OK" if ok else f"⚠️ 전송 실패: {_last_dashboard_error}"
+        await update.message.reply_text(f"✅ 전체수정 완료! 베이스로 저장했어요.\n{status}")
         return
 
     # ── 3) 부분수정 ──
@@ -726,13 +727,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_state[user_id]["last_checkpoint"] = result
             user_state[user_id]["buffer"] = []
             await processing_msg.delete()
-            await update.message.reply_text(result)
+            # 4096자 초과 시 분할 전송
+            MAX = 4000
+            if len(result) <= MAX:
+                await update.message.reply_text(result)
+            else:
+                for i in range(0, len(result), MAX):
+                    await update.message.reply_text(result[i:i+MAX])
             # ── 대시보드 자동 전송 ──
             ok = await send_to_dashboard(result, date_str)
-            if ok:
-                await update.message.reply_text("📤 대시보드 전송 OK")
-            else:
-                await update.message.reply_text(f"⚠️ 전송 실패 상세: {_last_dashboard_error}")
+            await update.message.reply_text("📤 대시보드 전송 OK" if ok else f"⚠️ 전송 실패: {_last_dashboard_error}")
         except Exception as e:
             logger.error(f"분석 오류: {e}")
             await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
