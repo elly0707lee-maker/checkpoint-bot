@@ -619,11 +619,18 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         lines_out = [header]
         items = []
         for name, bullets in stock_map.items():
-            # [[LINK:url]] 마커를 종목명 줄 끝에 붙이기
-            links = [b for b in bullets if b.startswith("[[LINK:")]
-            real_bullets = [b for b in bullets if not b.startswith("[[LINK:")]
-            name_line = name + (" " + links[0] if links else "")
-            item_lines = [name_line] + real_bullets
+            item_lines = [str(name)]
+            for entry in bullets:
+                if isinstance(entry, tuple) and len(entry) == 2:
+                    text, url = str(entry[0]), entry[1]
+                    line = text if text.startswith("-") else "- " + text
+                    if url:
+                        line = line + f" [[LINK:{url}]]"
+                elif isinstance(entry, str):
+                    line = entry if entry.startswith("-") else "- " + entry
+                else:
+                    continue
+                item_lines.append(line)
             items.append("\n".join(item_lines))
         lines_out.append("\n\n".join(items))
         return "\n".join(lines_out)
@@ -1099,3 +1106,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
