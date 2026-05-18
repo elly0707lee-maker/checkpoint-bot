@@ -531,6 +531,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         if prev_checkpoint:
             cp_base = re.split(r"\n📌코스피|\n📌시간외|\n📌NXT", prev_checkpoint)[0]
             cp_base_clean = re.sub(r"\s*\[\[LINK:[^\]]+\]\]", "", cp_base)
+            cp_base_clean = re.sub(r" *🔗", "", cp_base_clean)  # 전체수정 붙여넣기 시 평문 이모티콘도 제거
             user_content = (
                 f"날짜: {date_str}\n\n기존 체크포인트 (📌코스피/코스닥/시간외/NXT 섹션 제외):\n{cp_base_clean}\n\n"
                 f"---\n\n추가 내용 (반영해서 업데이트해줘. 📌코스피/📌코스닥/📌시간외/📌NXT 섹션은 출력하지 말 것):\n\n{structured_clean}"
