@@ -42,7 +42,8 @@ def convert_links_to_html(text: str) -> str:
     links = {}
     def replacer(m):
         key = f"__LINKPH{len(links)}__"
-        links[key] = f'<a href="{m.group(1)}">🔗</a>'
+        safe_url = m.group(1).replace("&", "&amp;")
+        links[key] = f'<a href="{safe_url}">🔗</a>'
         return " " + key
     text = _re.sub(r"\[\[LINK:([^\]]+)\]\]", replacer, text)
     # HTML 이스케이프
@@ -549,16 +550,20 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         )
         base = response.content[0].text.strip()
 
-        # sector_link_store의 링크를 섹터 헤더(✔️섹터명) 뒤에 주입 — 헤더는 Claude가 절대 안 바꿈
+        # sector_link_store의 링크를 섹터 헤더(✔️섹터명) 뒤에 주입
         for sector_name, urls in sector_link_store.items():
-            marker = f"✔️{sector_name}"
-            if marker not in base:
+            if f"✔️{sector_name}" not in base:
                 continue
             for url in urls:
                 if f"[[LINK:{url}]]" in base:
                     continue
-                # 헤더 줄 끝에 링크 추가
-                base = base.replace(marker, f"{marker} [[LINK:{url}]]", 1)
+                # 헤더 줄 찾기 (이미 링크가 붙어서 변형됐을 수 있으므로 ✔️섹터명으로 시작하는 줄 탐색)
+                lines = base.split("\n")
+                for i, line in enumerate(lines):
+                    if line.startswith(f"✔️{sector_name}"):
+                        lines[i] = line + f" [[LINK:{url}]]"
+                        base = "\n".join(lines)
+                        break
     else:
         base = f"{date_str} Check Point✨"
 
