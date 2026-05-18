@@ -367,7 +367,7 @@ def parse_multi_tag(text: str) -> list:
     반환: [(tag_type, tag_value, content), ...]
     """
     TAG_START = re.compile(
-        r"^(섹터|코스피|코스닥|지표|시간외|NXT)\s*/",
+        r"^(섹터|코스피|코스닥|지표|시간외|NXT|시그널)\s*/",
         re.IGNORECASE | re.MULTILINE
     )
     matches = list(TAG_START.finditer(text))
@@ -412,6 +412,11 @@ def parse_user_tag(text: str):
     if re.match(r"^시간외\s*/\s*", text, re.IGNORECASE):
         content = re.sub(r"^시간외\s*/\s*", "", text, flags=re.IGNORECASE).strip()
         return "AFTER_MARKET", "", content
+
+    # 시그널 태그
+    if re.match(r"^시그널\s*/\s*", text, re.IGNORECASE):
+        content = re.sub(r"^시그널\s*/\s*", "", text, flags=re.IGNORECASE).strip()
+        return "SIGNAL", "", content
 
     # NXT 태그
     if re.match(r"^NXT\s*/\s*", text, re.IGNORECASE):
@@ -459,6 +464,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
     kosdaq_items = []
     after_market_items = []
     nxt_items = []
+    signal_items = []
 
     for item in buffer:
         tag_type, tag_value, content = item
@@ -470,6 +476,8 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
             after_market_items.append(content)
         elif tag_type == "NXT":
             nxt_items.append(content)
+        elif tag_type == "SIGNAL":
+            signal_items.append(content)
         else:
             claude_buffer.append(item)
 
@@ -576,7 +584,18 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
     kospi_block = build_stock_block("📌코스피", existing_kospi_map)
     kosdaq_block = build_stock_block("📌코스닥", existing_kosdaq_map)
 
+    # ── 시장 시그널 ──
+    if signal_items:
+        signal_block = "📡시장 시그널\n\n" + "\n\n".join(signal_items)
+    elif prev_checkpoint:
+        sm = re.search(r"(📡시장 시그널.*?)(?=\n📌|\n📡|\Z)", prev_checkpoint, re.DOTALL)
+        signal_block = sm.group(1).strip() if sm else ""
+    else:
+        signal_block = ""
+
     result = base.strip()
+    if signal_block:
+        result += "\n\n" + signal_block
     if kospi_block:
         result += "\n\n" + kospi_block
     if kosdaq_block:
@@ -774,6 +793,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "INDICATOR": "📌지표",
             "AFTER_MARKET": "📌시간외 특이종목",
             "NXT": "📌NXT 괴리율",
+        "SIGNAL": "📡시장 시그널",
         }
         label = tag_display.get(tag_type, tag_value)
         is_append = bool(user_state[user_id].get("last_checkpoint"))
@@ -795,7 +815,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(parsed_blocks) == 1:
         tag_type, tag_value, content = parsed_blocks[0]
         is_tag_only = (
-            tag_type in ("SECTOR", "KOSPI", "KOSDAQ", "AFTER_MARKET", "NXT") and
+            tag_type in ("SECTOR", "KOSPI", "KOSDAQ", "AFTER_MARKET", "NXT", "SIGNAL") and
             not content.strip()
         )
         if is_tag_only:
