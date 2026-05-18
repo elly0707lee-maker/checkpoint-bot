@@ -249,10 +249,10 @@ SYSTEM_PROMPT = """너는 한국 경제방송 앵커의 방송 전 브리핑을 
 1. SECTOR 태그가 있으면 → 반드시 그 섹터명 그대로 📌Sector 아래 ✔️섹터명 으로 표시
 2. KOSPI 태그가 있으면 → 반드시 📌코스피 칸에만 표시. 섹터 칸에 절대 넣지 말 것.
 3. KOSDAQ 태그가 있으면 → 반드시 📌코스닥 칸에만 표시. 섹터 칸에 절대 넣지 말 것.
-4. US_MARKET 태그가 있으면 → 📌美증시 마감 칸에 표시
-5. US_MARKET 태그가 하나도 없으면 → 📌美증시 마감 섹션 절대 생성하지 말 것.
-6. INDICATOR 태그가 있으면 → 📌지표 섹션으로 체크포인트 맨 위(날짜 헤더 바로 아래)에 배치. 수치 절대 수정하지 말 것.
-7. INDICATOR 태그가 없으면 → 📌지표 섹션 생성하지 말 것.
+4. US_MARKET 태그가 있으면 → 🇺🇸美증시 마감 칸에 표시
+5. US_MARKET 태그가 하나도 없으면 → 🇺🇸美증시 마감 섹션 절대 생성하지 말 것.
+6. INDICATOR 태그가 있으면 → 📊지표 섹션으로 체크포인트 맨 위(날짜 헤더 바로 아래)에 배치. 수치 절대 수정하지 말 것.
+7. INDICATOR 태그가 없으면 → 📊지표 섹션 생성하지 말 것.
 8. AUTO 태그 내용은 네가 섹터 판단해서 분류
 9. ** 볼드 표시 절대 금지
 10. 섹터 중분류는 ✔️ 사용
@@ -264,10 +264,10 @@ SYSTEM_PROMPT = """너는 한국 경제방송 앵커의 방송 전 브리핑을 
 출력 형식:
 {날짜} Check Point✨
 
-📌지표
+📊지표
 [INDICATOR 내용. 없으면 이 섹션 통째로 생략]
 
-📌美증시 마감
+🇺🇸美증시 마감
 [US_MARKET 태그 내용만. 없으면 이 섹션 통째로 생략]
 
 📌Sector
@@ -593,9 +593,19 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
     else:
         signal_block = ""
 
+    # 시그널은 📌Sector 바로 앞에 삽입
     result = base.strip()
     if signal_block:
-        result += "\n\n" + signal_block
+        sector_markers = ["\n📌Sector", "\n📌sector", "\n📌섹터"]
+        inserted = False
+        for marker in sector_markers:
+            if marker in result:
+                idx = result.index(marker)
+                result = result[:idx] + "\n\n" + signal_block + result[idx:]
+                inserted = True
+                break
+        if not inserted:
+            result += "\n\n" + signal_block
     if kospi_block:
         result += "\n\n" + kospi_block
     if kosdaq_block:
@@ -632,9 +642,9 @@ async def apply_partial_edit(checkpoint: str, edit_type: str, target: str, new_c
     elif edit_type == "코스닥":
         instruction = f"📌코스닥 아래 '{target}' 항목의 내용을 아래로 교체해줘:\n{new_content}"
     elif edit_type == "미증시":
-        instruction = f"📌美증시 마감 섹션 내용을 아래로 교체해줘:\n{new_content}"
+        instruction = f"🇺🇸美증시 마감 섹션 내용을 아래로 교체해줘:\n{new_content}"
     elif edit_type == "지표":
-        instruction = f"📌지표 섹션 내용을 아래로 교체해줘:\n{new_content}"
+        instruction = f"📊지표 섹션 내용을 아래로 교체해줘:\n{new_content}"
     elif edit_type == "시간외":
         instruction = f"📌시간외 특이종목 섹션 내용을 아래로 교체해줘:\n{new_content}"
     elif edit_type == "NXT":
@@ -789,8 +799,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "SECTOR": f"✔️섹터/{tag_value}",
             "KOSPI": f"📌코스피/{tag_value}",
             "KOSDAQ": f"📌코스닥/{tag_value}",
-            "US_MARKET": "📌美증시 마감",
-            "INDICATOR": "📌지표",
+            "US_MARKET": "🇺🇸美증시 마감",
+            "INDICATOR": "📊지표",
             "AFTER_MARKET": "📌시간외 특이종목",
             "NXT": "📌NXT 괴리율",
         "SIGNAL": "📡시장 시그널",
@@ -807,7 +817,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     def get_label(tt, tv):
         m = {"SECTOR": f"✔️섹터/{tv}", "KOSPI": f"📌코스피/{tv}", "KOSDAQ": f"📌코스닥/{tv}",
-             "US_MARKET": "📌美증시 마감", "INDICATOR": "📌지표",
+             "US_MARKET": "🇺🇸美증시 마감", "INDICATOR": "📊지표",
              "AFTER_MARKET": "📌시간외 특이종목", "NXT": "📌NXT 괴리율", "AUTO": "🔍자동분류"}
         return m.get(tt, tv)
 
@@ -947,8 +957,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await processing_msg.delete()
             await update.message.reply_text(
-                f"✅ 📌지표 저장 완료! ({count}개 {mode})\n\n"
-                f"📌지표\n{extracted}\n\n"
+                f"✅ 📊지표 저장 완료! ({count}개 {mode})\n\n"
+                f"📊지표\n{extracted}\n\n"
                 f"'정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
             )
 
