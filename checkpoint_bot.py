@@ -510,8 +510,18 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         structured = format_buffer_for_claude(claude_buffer)
         if prev_checkpoint:
             cp_base = re.split(r"\n📌코스피|\n📌시간외|\n📌NXT", prev_checkpoint)[0]
+
+            # [[LINK:url]] 마커를 cp_base에서 추출해 저장하고 Claude에는 제거된 버전 전달
+            link_registry = {}  # {bullet_text: url}
+            for m in re.finditer(r"(.+?)\s*\[\[LINK:([^\]]+)\]\]", cp_base):
+                bullet = m.group(1).strip()
+                url = m.group(2)
+                if bullet:
+                    link_registry[bullet] = url
+            cp_base_clean = re.sub(r"\s*\[\[LINK:[^\]]+\]\]", "", cp_base)
+
             user_content = (
-                f"날짜: {date_str}\n\n기존 체크포인트 (📌코스피/코스닥/시간외/NXT 섹션 제외):\n{cp_base}\n\n"
+                f"날짜: {date_str}\n\n기존 체크포인트 (📌코스피/코스닥/시간외/NXT 섹션 제외):\n{cp_base_clean}\n\n"
                 f"---\n\n추가 내용 (반영해서 업데이트해줘. 📌코스피/📌코스닥/📌시간외/📌NXT 섹션은 출력하지 말 것):\n\n{structured}"
             )
         else:
@@ -521,6 +531,21 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
                 if structured.strip() else f"날짜: {date_str}"
             )
 
+        # structured(버퍼)에서도 링크 추출
+        buffer_link_registry = {}
+        for m in re.finditer(r"(.+?)\s*\[\[LINK:([^\]]+)\]\]", structured):
+            bullet = m.group(1).strip()
+            url = m.group(2)
+            if bullet:
+                buffer_link_registry[bullet] = url
+        structured_clean = re.sub(r"\s*\[\[LINK:[^\]]+\]\]", "", structured)
+
+        # Claude에는 링크 없는 버전 전달
+        if prev_checkpoint:
+            user_content = user_content.replace(structured, structured_clean)
+        else:
+            user_content = user_content.replace(structured, structured_clean)
+
         response = client.messages.create(
             model="claude-opus-4-20250514",
             max_tokens=2000,
@@ -528,8 +553,15 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
             messages=[{"role": "user", "content": user_content}],
         )
         base = response.content[0].text.strip()
+
+        # Claude 출력에 링크 재주입 (cp_base + 버퍼 링크 모두)
+        all_links = {**(link_registry if prev_checkpoint else {}), **buffer_link_registry}
+        for bullet, url in all_links.items():
+            if bullet in base and f"[[LINK:{url}]]" not in base:
+                base = base.replace(bullet, f"{bullet} [[LINK:{url}]]", 1)
     else:
         base = f"{date_str} Check Point✨"
+        link_registry = {}
 
     # 기존 코스피/코스닥 파싱
     existing_kospi_map = {}
