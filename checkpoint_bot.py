@@ -537,6 +537,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
 
     if prev_checkpoint:
         def parse_stock_section(section_text: str) -> dict:
+            """prev_checkpoint에서 기존 종목 파싱 → {종목명: [(bullet, url), ...]}"""
             result = {}
             current_name = None
             current_lines = []
@@ -545,14 +546,17 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
                 if not line:
                     continue
                 if line.startswith("-"):
-                    if current_name:
-                        current_lines.append(line)
+                    if current_name is not None:
+                        link_m = re.search(r"\[\[LINK:([^\]]+)\]\]", line)
+                        clean = re.sub(r"\[\[LINK:[^\]]+\]\]", "", line).strip()
+                        url = link_m.group(1) if link_m else None
+                        current_lines.append((clean, url))
                 else:
-                    if current_name:
+                    if current_name is not None:
                         result[current_name] = current_lines
                     current_name = line
                     current_lines = []
-            if current_name:
+            if current_name is not None:
                 result[current_name] = current_lines
             return result
 
@@ -590,10 +594,24 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         bullets = [l for l in lines if len(l) > 5][:2]
         return [f"- {b}" if not b.startswith("-") else b for b in bullets]
 
-    for name, content in kospi_items:
-        existing_kospi_map[name] = summarize_content(content)
-    for name, content in kosdaq_items:
-        existing_kosdaq_map[name] = summarize_content(content)
+    # [[LINK:url]] 마커를 분리해서 보존
+    kospi_links = {}
+    for name, c in kospi_items:
+        link_m = re.findall(r"\[\[LINK:([^\]]+)\]\]", c)
+        clean_c = re.sub(r"\[\[LINK:[^\]]+\]\]", "", c).strip()
+        bullets = summarize_content(clean_c)
+        if link_m:
+            bullets.append(f"[[LINK:{link_m[0]}]]")
+        existing_kospi_map[name] = bullets
+
+    kosdaq_links = {}
+    for name, c in kosdaq_items:
+        link_m = re.findall(r"\[\[LINK:([^\]]+)\]\]", c)
+        clean_c = re.sub(r"\[\[LINK:[^\]]+\]\]", "", c).strip()
+        bullets = summarize_content(clean_c)
+        if link_m:
+            bullets.append(f"[[LINK:{link_m[0]}]]")
+        existing_kosdaq_map[name] = bullets
 
     def build_stock_block(header: str, stock_map: dict) -> str:
         if not stock_map:
@@ -601,7 +619,11 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         lines_out = [header]
         items = []
         for name, bullets in stock_map.items():
-            item_lines = [name] + bullets
+            # [[LINK:url]] 마커를 종목명 줄 끝에 붙이기
+            links = [b for b in bullets if b.startswith("[[LINK:")]
+            real_bullets = [b for b in bullets if not b.startswith("[[LINK:")]
+            name_line = name + (" " + links[0] if links else "")
+            item_lines = [name_line] + real_bullets
             items.append("\n".join(item_lines))
         lines_out.append("\n\n".join(items))
         return "\n".join(lines_out)
