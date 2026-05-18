@@ -482,7 +482,7 @@ def format_buffer_for_claude(buffer: list) -> str:
 
     return "\n\n---\n\n".join(parts)
 
-async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = None) -> str:
+async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = None, sector_link_store: dict = None) -> str:
     """체크포인트 생성. KOSPI/KOSDAQ/AFTER_MARKET/NXT는 코드에서 직접 처리."""
     claude_buffer = []
     kospi_items = []
@@ -506,45 +506,40 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         else:
             claude_buffer.append(item)
 
+    if sector_link_store is None:
+        sector_link_store = {}
+
     if claude_buffer or prev_checkpoint:
         structured = format_buffer_for_claude(claude_buffer)
-        if prev_checkpoint:
-            cp_base = re.split(r"\n📌코스피|\n📌시간외|\n📌NXT", prev_checkpoint)[0]
 
-            # [[LINK:url]] 마커를 cp_base에서 추출해 저장하고 Claude에는 제거된 버전 전달
-            link_registry = {}  # {bullet_text: url}
-            for m in re.finditer(r"(.+?)\s*\[\[LINK:([^\]]+)\]\]", cp_base):
-                bullet = m.group(1).strip()
-                url = m.group(2)
-                if bullet:
-                    link_registry[bullet] = url
-            cp_base_clean = re.sub(r"\s*\[\[LINK:[^\]]+\]\]", "", cp_base)
+        # 버퍼에서 섹터 링크 추출 → sector_link_store에 누적 저장
+        for m in re.finditer(r"\[\[LINK:([^\]]+)\]\]", structured):
+            url = m.group(1)
+            # 어느 섹터인지 찾기 (SECTOR 태그 아이템에서)
+            for item in claude_buffer:
+                tag_type, tag_value, item_content = item
+                if tag_type == "SECTOR" and url in item_content:
+                    if tag_value not in sector_link_store:
+                        sector_link_store[tag_value] = []
+                    if url not in sector_link_store[tag_value]:
+                        sector_link_store[tag_value].append(url)
 
-            user_content = (
-                f"날짜: {date_str}\n\n기존 체크포인트 (📌코스피/코스닥/시간외/NXT 섹션 제외):\n{cp_base_clean}\n\n"
-                f"---\n\n추가 내용 (반영해서 업데이트해줘. 📌코스피/📌코스닥/📌시간외/📌NXT 섹션은 출력하지 말 것):\n\n{structured}"
-            )
-        else:
-            user_content = (
-                f"날짜: {date_str}\n\n{structured}\n\n"
-                f"※ 📌코스피/📌코스닥 섹션은 출력하지 말 것. Sector와 美증시와 지표만 출력."
-                if structured.strip() else f"날짜: {date_str}"
-            )
-
-        # structured(버퍼)에서도 링크 추출
-        buffer_link_registry = {}
-        for m in re.finditer(r"(.+?)\s*\[\[LINK:([^\]]+)\]\]", structured):
-            bullet = m.group(1).strip()
-            url = m.group(2)
-            if bullet:
-                buffer_link_registry[bullet] = url
+        # Claude에는 링크 마커 없는 버전 전달
         structured_clean = re.sub(r"\s*\[\[LINK:[^\]]+\]\]", "", structured)
 
-        # Claude에는 링크 없는 버전 전달
         if prev_checkpoint:
-            user_content = user_content.replace(structured, structured_clean)
+            cp_base = re.split(r"\n📌코스피|\n📌시간외|\n📌NXT", prev_checkpoint)[0]
+            cp_base_clean = re.sub(r"\s*\[\[LINK:[^\]]+\]\]", "", cp_base)
+            user_content = (
+                f"날짜: {date_str}\n\n기존 체크포인트 (📌코스피/코스닥/시간외/NXT 섹션 제외):\n{cp_base_clean}\n\n"
+                f"---\n\n추가 내용 (반영해서 업데이트해줘. 📌코스피/📌코스닥/📌시간외/📌NXT 섹션은 출력하지 말 것):\n\n{structured_clean}"
+            )
         else:
-            user_content = user_content.replace(structured, structured_clean)
+            user_content = (
+                f"날짜: {date_str}\n\n{structured_clean}\n\n"
+                f"※ 📌코스피/📌코스닥 섹션은 출력하지 말 것. Sector와 美증시와 지표만 출력."
+                if structured_clean.strip() else f"날짜: {date_str}"
+            )
 
         response = client.messages.create(
             model="claude-opus-4-20250514",
@@ -554,26 +549,29 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         )
         base = response.content[0].text.strip()
 
-        # Claude 출력에 링크 재주입 (cp_base + 버퍼 링크 모두)
-        all_links = {**(link_registry if prev_checkpoint else {}), **buffer_link_registry}
-        for bullet, url in all_links.items():
-            if f"[[LINK:{url}]]" in base:
-                continue  # 이미 있으면 스킵
-            if bullet in base:
-                # 완전 일치
-                base = base.replace(bullet, f"{bullet} [[LINK:{url}]]", 1)
-            else:
-                # 부분 일치: bullet 앞 20자로 줄 찾기
-                prefix = bullet.lstrip("- ").strip()[:20]
-                if prefix and prefix in base:
-                    idx = base.find(prefix)
-                    line_end = base.find("\n", idx)
-                    if line_end == -1:
-                        line_end = len(base)
-                    base = base[:line_end] + f" [[LINK:{url}]]" + base[line_end:]
+        # sector_link_store의 링크를 섹터명으로 찾아 재주입 (텍스트 매칭 불필요!)
+        for sector_name, urls in sector_link_store.items():
+            marker = f"✔️{sector_name}"
+            if marker not in base:
+                continue
+            for url in urls:
+                if f"[[LINK:{url}]]" in base:
+                    continue
+                # 해당 섹터의 마지막 bullet 줄 끝에 주입
+                idx = base.find(marker)
+                next_sector = base.find("\n✔️", idx + 1)
+                if next_sector == -1:
+                    next_sector = len(base)
+                sector_block = base[idx:next_sector]
+                last_bullet = sector_block.rfind("\n-")
+                if last_bullet == -1:
+                    insert_at = idx + len(marker)
+                else:
+                    line_end = sector_block.find("\n", last_bullet + 1)
+                    insert_at = idx + (line_end if line_end != -1 else len(sector_block))
+                base = base[:insert_at] + f" [[LINK:{url}]]" + base[insert_at:]
     else:
         base = f"{date_str} Check Point✨"
-        link_registry = {}
 
     # 기존 코스피/코스닥 파싱
     existing_kospi_map = {}
@@ -857,11 +855,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         processing_msg = await update.message.reply_text("⏳ 통합 정리 중...")
         try:
             date_str = state.get("date", datetime.now().strftime("%-m/%-d"))
+            # sector_link_store를 user_state에서 가져와 전달 (누적 유지)
+            if "sector_link_store" not in user_state[user_id]:
+                user_state[user_id]["sector_link_store"] = {}
+            sls = user_state[user_id]["sector_link_store"]
             result = await build_checkpoint(
                 state["buffer"],
                 date_str,
-                prev_checkpoint=state.get("last_checkpoint")
+                prev_checkpoint=state.get("last_checkpoint"),
+                sector_link_store=sls
             )
+            # build_checkpoint가 sls를 in-place로 업데이트하므로 자동 반영
             user_state[user_id]["last_checkpoint"] = result
             user_state[user_id]["buffer"] = []
             await processing_msg.delete()
