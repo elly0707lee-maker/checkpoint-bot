@@ -557,8 +557,20 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         # Claude 출력에 링크 재주입 (cp_base + 버퍼 링크 모두)
         all_links = {**(link_registry if prev_checkpoint else {}), **buffer_link_registry}
         for bullet, url in all_links.items():
-            if bullet in base and f"[[LINK:{url}]]" not in base:
+            if f"[[LINK:{url}]]" in base:
+                continue  # 이미 있으면 스킵
+            if bullet in base:
+                # 완전 일치
                 base = base.replace(bullet, f"{bullet} [[LINK:{url}]]", 1)
+            else:
+                # 부분 일치: bullet 앞 20자로 줄 찾기
+                prefix = bullet.lstrip("- ").strip()[:20]
+                if prefix and prefix in base:
+                    idx = base.find(prefix)
+                    line_end = base.find("\n", idx)
+                    if line_end == -1:
+                        line_end = len(base)
+                    base = base[:line_end] + f" [[LINK:{url}]]" + base[line_end:]
     else:
         base = f"{date_str} Check Point✨"
         link_registry = {}
