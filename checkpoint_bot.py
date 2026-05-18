@@ -594,24 +594,23 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         bullets = [l for l in lines if len(l) > 5][:2]
         return [f"- {b}" if not b.startswith("-") else b for b in bullets]
 
-    # [[LINK:url]] 마커를 분리해서 보존
-    kospi_links = {}
-    for name, c in kospi_items:
-        link_m = re.findall(r"\[\[LINK:([^\]]+)\]\]", c)
-        clean_c = re.sub(r"\[\[LINK:[^\]]+\]\]", "", c).strip()
-        bullets = summarize_content(clean_c)
-        if link_m:
-            bullets.append(f"[[LINK:{link_m[0]}]]")
-        existing_kospi_map[name] = bullets
+    def add_to_stock_map(items_list, stock_map):
+        """기사별 bullet+링크를 절대 유실 없이 누적 (덮어쓰기 금지)"""
+        for name, c in items_list:
+            link_m = re.findall(r"\[\[LINK:([^\]]+)\]\]", c)
+            clean_c = re.sub(r"\[\[LINK:[^\]]+\]\]", "", c).strip()
+            bullets = summarize_content(clean_c)
+            link_url = link_m[0] if link_m else None
+            if name not in stock_map:
+                stock_map[name] = []
+            if bullets:
+                stock_map[name].append((bullets[0], link_url))
+            elif link_url:
+                # 크롤링 실패해도 링크는 반드시 보존
+                stock_map[name].append(("- 관련 기사", link_url))
 
-    kosdaq_links = {}
-    for name, c in kosdaq_items:
-        link_m = re.findall(r"\[\[LINK:([^\]]+)\]\]", c)
-        clean_c = re.sub(r"\[\[LINK:[^\]]+\]\]", "", c).strip()
-        bullets = summarize_content(clean_c)
-        if link_m:
-            bullets.append(f"[[LINK:{link_m[0]}]]")
-        existing_kosdaq_map[name] = bullets
+    add_to_stock_map(kospi_items, existing_kospi_map)
+    add_to_stock_map(kosdaq_items, existing_kosdaq_map)
 
     def build_stock_block(header: str, stock_map: dict) -> str:
         if not stock_map:
@@ -1106,4 +1105,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
