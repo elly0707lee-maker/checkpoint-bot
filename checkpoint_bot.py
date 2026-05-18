@@ -277,6 +277,7 @@ SYSTEM_PROMPT = """너는 한국 경제방송 앵커의 방송 전 브리핑을 
 6. INDICATOR 태그가 있으면 → 📊지표 섹션으로 체크포인트 맨 위(날짜 헤더 바로 아래)에 배치. 수치 절대 수정하지 말 것.
 7. INDICATOR 태그가 없으면 → 📊지표 섹션 생성하지 말 것.
 6. [[LINK:url]] 마커가 있으면 반드시 원문 그대로 해당 내용 끝에 보존. 절대 수정·삭제 금지.
+7. 📡시장 시그널 섹션은 절대 생성하지 말 것. 코드에서 별도 처리함.
 7. AUTO 태그 내용은 네가 섹터 판단해서 분류
 9. ** 볼드 표시 절대 금지
 10. 섹터 중분류는 ✔️ 사용
@@ -694,8 +695,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("접근 권한이 없습니다.")
         return
 
-    user_text = update.message.text
-    if not user_text or not user_text.strip():
+    user_text = update.message.text or ""
+    # 텔레그램 entities에서 URL 추출 (포워드 메시지 링크 포함)
+    entity_urls = []
+    msg = update.message
+    all_entities = list(msg.entities or []) + list(msg.caption_entities or [])
+    entity_text = user_text or msg.caption or ""
+    for ent in all_entities:
+        if ent.type in ("url", "text_link"):
+            if ent.type == "text_link":
+                entity_urls.append(ent.url)
+            else:
+                entity_urls.append(entity_text[ent.offset:ent.offset + ent.length])
+
+    if not user_text.strip() and not entity_urls:
         return
 
     text = user_text.strip()
@@ -807,10 +820,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     pending = user_state[user_id].get("pending_tag")
 
-    has_url = bool(extract_urls(text))
+    has_url = bool(extract_urls(text)) or bool(entity_urls)
     if has_url:
         processing_msg = await update.message.reply_text("🔍 링크 읽는 중...")
-        enriched_text, _ = await enrich_text_with_url(text)
+        enriched_text, found_urls = await enrich_text_with_url(text)
+        # entity_urls 중 아직 안 처리된 것 추가
+        for eu in entity_urls:
+            if eu not in found_urls:
+                fetched = await fetch_url_text(eu)
+                if fetched:
+                    enriched_text = enriched_text + "\n" + fetched
+                enriched_text += f"\n[[LINK:{eu}]]"
         await processing_msg.delete()
     else:
         enriched_text = text
