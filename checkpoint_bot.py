@@ -586,7 +586,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
 
     # ── 시장 시그널 ──
     if signal_items:
-        signal_block = "📡시장 시그널\n\n" + "\n\n".join(signal_items)
+        signal_block = "📡시장 시그널\n" + "\n".join(signal_items)
     elif prev_checkpoint:
         sm = re.search(r"(📡시장 시그널.*?)(?=\n📌|\n📡|\Z)", prev_checkpoint, re.DOTALL)
         signal_block = sm.group(1).strip() if sm else ""
@@ -601,7 +601,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         for marker in sector_markers:
             if marker in result:
                 idx = result.index(marker)
-                result = result[:idx] + "\n\n" + signal_block + result[idx:]
+                result = result[:idx] + "\n\n" + signal_block + "\n" + result[idx:]
                 inserted = True
                 break
         if not inserted:
