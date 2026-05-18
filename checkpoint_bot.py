@@ -549,7 +549,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         )
         base = response.content[0].text.strip()
 
-        # sector_link_store의 링크를 섹터명으로 찾아 재주입 (텍스트 매칭 불필요!)
+        # sector_link_store의 링크를 섹터 헤더(✔️섹터명) 뒤에 주입 — 헤더는 Claude가 절대 안 바꿈
         for sector_name, urls in sector_link_store.items():
             marker = f"✔️{sector_name}"
             if marker not in base:
@@ -557,19 +557,8 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
             for url in urls:
                 if f"[[LINK:{url}]]" in base:
                     continue
-                # 해당 섹터의 마지막 bullet 줄 끝에 주입
-                idx = base.find(marker)
-                next_sector = base.find("\n✔️", idx + 1)
-                if next_sector == -1:
-                    next_sector = len(base)
-                sector_block = base[idx:next_sector]
-                last_bullet = sector_block.rfind("\n-")
-                if last_bullet == -1:
-                    insert_at = idx + len(marker)
-                else:
-                    line_end = sector_block.find("\n", last_bullet + 1)
-                    insert_at = idx + (line_end if line_end != -1 else len(sector_block))
-                base = base[:insert_at] + f" [[LINK:{url}]]" + base[insert_at:]
+                # 헤더 줄 끝에 링크 추가
+                base = base.replace(marker, f"{marker} [[LINK:{url}]]", 1)
     else:
         base = f"{date_str} Check Point✨"
 
