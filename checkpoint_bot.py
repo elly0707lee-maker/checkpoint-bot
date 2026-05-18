@@ -35,6 +35,23 @@ client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 # ── 대시보드 전송 ─────────────────────────────────────────
 _last_dashboard_error = ""
 
+def convert_links_to_html(text: str) -> str:
+    """[[LINK:url]] 마커를 HTML 링크로 변환하고 나머지 텍스트 HTML 이스케이프"""
+    import re as _re
+    # 마커 추출 후 플레이스홀더로 교체
+    links = {}
+    def replacer(m):
+        key = f"__LINKPH{len(links)}__"
+        links[key] = f'<a href="{m.group(1)}">🔗</a>'
+        return " " + key
+    text = _re.sub(r"\[\[LINK:([^\]]+)\]\]", replacer, text)
+    # HTML 이스케이프
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # 플레이스홀더 복원
+    for key, val in links.items():
+        text = text.replace(key, val)
+    return text
+
 async def send_to_dashboard(content: str, date_str: str) -> bool:
     """체크포인트를 대시보드 /api/post/checkpoint 로 전송"""
     global _last_dashboard_error
@@ -100,19 +117,25 @@ async def fetch_url_text(url: str) -> str | None:
 def extract_urls(text: str) -> list:
     return re.findall(r'https?://[^\s]+', text)
 
-async def enrich_text_with_url(text: str) -> str:
+async def enrich_text_with_url(text: str) -> tuple[str, list[str]]:
+    """URL 크롤링 + 원본 URL 목록 반환"""
     urls = extract_urls(text)
     if not urls:
-        return text
+        return text, []
     enriched = text
+    found_urls = []
     for url in urls:
         fetched = await fetch_url_text(url)
         if fetched:
-            enriched = enriched.replace(url, f"{url}\n{fetched}")
+            enriched = enriched.replace(url, fetched)
             logger.info(f"크롤링 성공: {url}")
         else:
+            enriched = enriched.replace(url, "")
             logger.info(f"크롤링 실패, 원문 텍스트 사용: {url}")
-    return enriched
+        found_urls.append(url)
+    # URL 마커를 content 끝에 추가
+    markers = "".join(f"\n[[LINK:{u}]]" for u in found_urls)
+    return enriched.strip() + markers, found_urls
 
 # ── 이미지 → Claude Vision으로 지표 추출 ──────────────────
 async def extract_indicators_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str | None:
@@ -253,7 +276,8 @@ SYSTEM_PROMPT = """너는 한국 경제방송 앵커의 방송 전 브리핑을 
 5. US_MARKET 태그가 하나도 없으면 → 🇺🇸美증시 마감 섹션 절대 생성하지 말 것.
 6. INDICATOR 태그가 있으면 → 📊지표 섹션으로 체크포인트 맨 위(날짜 헤더 바로 아래)에 배치. 수치 절대 수정하지 말 것.
 7. INDICATOR 태그가 없으면 → 📊지표 섹션 생성하지 말 것.
-8. AUTO 태그 내용은 네가 섹터 판단해서 분류
+6. [[LINK:url]] 마커가 있으면 반드시 원문 그대로 해당 내용 끝에 보존. 절대 수정·삭제 금지.
+7. AUTO 태그 내용은 네가 섹터 판단해서 분류
 9. ** 볼드 표시 절대 금지
 10. 섹터 중분류는 ✔️ 사용
 11. 기사에 언급된 종목은 해당 섹터 안 "관련 종목:" 줄에만. 코스피/코스닥 칸에 중복 금지.
@@ -713,7 +737,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_state[user_id]["date"] = date_str
         ok = await send_to_dashboard(new_checkpoint, date_str)
         status = "📤 대시보드 전송 OK" if ok else f"⚠️ 전송 실패: {_last_dashboard_error}"
-        await update.message.reply_text(f"✅ 전체수정 완료! 베이스로 저장했어요.\n{status}")
+        await update.message.reply_text(f"✅ 전체수정 완료! 베이스로 저장했어요.\n{status}", parse_mode="HTML")
         return
 
     # ── 3) 부분수정 ──
@@ -756,13 +780,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_state[user_id]["last_checkpoint"] = result
             user_state[user_id]["buffer"] = []
             await processing_msg.delete()
+            # 링크 마커 → HTML 변환
+            html_result = convert_links_to_html(result)
             # 4096자 초과 시 분할 전송
             MAX = 4000
-            if len(result) <= MAX:
-                await update.message.reply_text(result)
+            if len(html_result) <= MAX:
+                await update.message.reply_text(html_result, parse_mode="HTML")
             else:
-                for i in range(0, len(result), MAX):
-                    await update.message.reply_text(result[i:i+MAX])
+                for i in range(0, len(html_result), MAX):
+                    await update.message.reply_text(html_result[i:i+MAX], parse_mode="HTML")
             # ── 대시보드 자동 전송 ──
             ok = await send_to_dashboard(result, date_str)
             await update.message.reply_text("📤 대시보드 전송 OK" if ok else f"⚠️ 전송 실패: {_last_dashboard_error}")
@@ -784,7 +810,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     has_url = bool(extract_urls(text))
     if has_url:
         processing_msg = await update.message.reply_text("🔍 링크 읽는 중...")
-        enriched_text = await enrich_text_with_url(text)
+        enriched_text, _ = await enrich_text_with_url(text)
         await processing_msg.delete()
     else:
         enriched_text = text
