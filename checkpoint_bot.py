@@ -78,8 +78,9 @@ async def send_to_dashboard(content: str, date_str: str) -> bool:
                     logger.error(f"대시보드 전송 실패 {resp.status}: {body[:200]}")
                     return False
     except Exception as e:
-        _last_dashboard_error = f"예외: {str(e)[:150]}"
-        logger.error(f"대시보드 전송 오류: {e}")
+        err_detail = f"{type(e).__name__}: {str(e)}"
+        _last_dashboard_error = err_detail[:200]
+        logger.error(f"대시보드 전송 오류: {err_detail}")
         return False
 
 # ── URL 크롤링 ──────────────────────────────────────────
