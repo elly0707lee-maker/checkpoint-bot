@@ -67,7 +67,7 @@ async def send_to_dashboard(content: str, date_str: str) -> bool:
     }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 body = await resp.text()
                 if resp.status == 200:
                     logger.info("대시보드 전송 성공")
