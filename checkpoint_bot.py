@@ -814,9 +814,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         date_str = date_match.group(1) if date_match else datetime.now().strftime("%-m/%-d")
         if date_match:
             user_state[user_id]["date"] = date_str
-        ok = await send_to_dashboard(new_checkpoint, date_str)
-        status = "📤 대시보드 전송 OK" if ok else f"⚠️ 전송 실패: {_last_dashboard_error}"
-        await update.message.reply_text(f"✅ 전체수정 완료! 베이스로 저장했어요.\n{status}", parse_mode="HTML")
+        asyncio.create_task(send_to_dashboard(new_checkpoint, date_str))
+        await update.message.reply_text("✅ 전체수정 완료! 베이스로 저장했어요.", parse_mode="HTML")
         return
 
     # ── 3) 부분수정 ──
@@ -874,9 +873,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 for i in range(0, len(html_result), MAX):
                     await update.message.reply_text(html_result[i:i+MAX], parse_mode="HTML")
-            # ── 대시보드 자동 전송 ──
-            ok = await send_to_dashboard(result, date_str)
-            await update.message.reply_text("📤 대시보드 전송 OK" if ok else f"⚠️ 전송 실패: {_last_dashboard_error}")
+            # ── 대시보드 자동 전송 (백그라운드) ──
+            asyncio.create_task(send_to_dashboard(result, date_str))
         except Exception as e:
             logger.error(f"분석 오류: {e}")
             await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
