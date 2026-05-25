@@ -844,9 +844,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         processing_msg = await update.message.reply_text(f"⏳ {edit_type}/{target} 수정 중...")
         try:
             result = await apply_partial_edit(state["last_checkpoint"], edit_type, target, new_content)
-            user_state[user_id]["last_checkpoint"] = result
+            # 부분수정 후에도 sector_link_store 링크 재주입
+            sls = user_state[user_id].get("sector_link_store", {})
+            result_clean = re.sub(r" *🔗", "", result)
+            for sector_name, urls in sls.items():
+                lines = result_clean.split("\n")
+                for i, line in enumerate(lines):
+                    if line.startswith(f"✔️{sector_name}"):
+                        for url in urls:
+                            if f"[[LINK:{url}]]" not in line:
+                                line = line + f" [[LINK:{url}]]"
+                        lines[i] = line
+                result_clean = "\n".join(lines)
+            user_state[user_id]["last_checkpoint"] = result_clean
+            html_result = convert_links_to_html(result_clean)
             await processing_msg.delete()
-            await update.message.reply_text("✅ 수정 완료!\n\n" + result)
+            if len(html_result) <= 4000:
+                await update.message.reply_text("✅ 수정 완료!\n\n" + html_result, parse_mode="HTML")
+            else:
+                await update.message.reply_text("✅ 수정 완료!")
+                for i in range(0, len(html_result), 4000):
+                    await update.message.reply_text(html_result[i:i+4000], parse_mode="HTML")
         except Exception as e:
             logger.error(f"수정 오류: {e}")
             await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
