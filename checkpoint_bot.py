@@ -808,13 +808,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id not in user_state:
             today = datetime.now().strftime("%-m/%-d")
             user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None, "pending_tag": None}
-        user_state[user_id]["last_checkpoint"] = new_checkpoint
+        # 평문 🔗 제거 후 sector_link_store에서 링크 즉시 재주입
+        clean_cp = re.sub(r" *🔗", "", new_checkpoint)
+        sls = user_state[user_id].get("sector_link_store", {})
+        for sector_name, urls in sls.items():
+            lines = clean_cp.split("\n")
+            for i, line in enumerate(lines):
+                if line.startswith(f"✔️{sector_name}"):
+                    for url in urls:
+                        if f"[[LINK:{url}]]" not in line:
+                            line = line + f" [[LINK:{url}]]"
+                    lines[i] = line
+            clean_cp = "\n".join(lines)
+
+        user_state[user_id]["last_checkpoint"] = clean_cp
         user_state[user_id]["buffer"] = []
-        date_match = re.search(r"(\d{1,2}/\d{1,2})", new_checkpoint)
+        date_match = re.search(r"(\d{1,2}/\d{1,2})", clean_cp)
         date_str = date_match.group(1) if date_match else datetime.now().strftime("%-m/%-d")
         if date_match:
             user_state[user_id]["date"] = date_str
-        asyncio.create_task(send_to_dashboard(new_checkpoint, date_str))
+        asyncio.create_task(send_to_dashboard(clean_cp, date_str))
         await update.message.reply_text("✅ 전체수정 완료! 베이스로 저장했어요.", parse_mode="HTML")
         return
 
