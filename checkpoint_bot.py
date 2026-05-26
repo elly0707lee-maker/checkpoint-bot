@@ -843,10 +843,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         processing_msg = await update.message.reply_text(f"⏳ {edit_type}/{target} 수정 중...")
         try:
+            # 수정 내용에 URL 있으면 크롤링 + 링크 저장
+            edit_urls = extract_urls(new_content)
+            if edit_urls:
+                fetched_parts = []
+                for eu in edit_urls:
+                    fetched = await fetch_url_text(eu)
+                    if fetched:
+                        fetched_parts.append(fetched)
+                    new_content = new_content.replace(eu, "").strip()
+                if fetched_parts:
+                    new_content = new_content + "\n" + "\n".join(fetched_parts)
+                # 링크 저장: 섹터면 sector_link_store, 코스피/코스닥이면 edit_url_map
+                if edit_type == "섹터" and target:
+                    if "sector_link_store" not in user_state[user_id]:
+                        user_state[user_id]["sector_link_store"] = {}
+                    sls = user_state[user_id]["sector_link_store"]
+                    if target not in sls:
+                        sls[target] = []
+                    for eu in edit_urls:
+                        if eu not in sls[target]:
+                            sls[target].append(eu)
+                elif edit_type in ("코스피", "코스닥") and target:
+                    # 수정 후 해당 종목 줄에 링크 달기 위해 임시 저장
+                    new_content = new_content + "\n" + "\n".join(f"[[LINK:{eu}]]" for eu in edit_urls)
             result = await apply_partial_edit(state["last_checkpoint"], edit_type, target, new_content)
-            # 부분수정 후에도 sector_link_store 링크 재주입
+            # 부분수정 후 sector_link_store 링크 재주입
             sls = user_state[user_id].get("sector_link_store", {})
             result_clean = re.sub(r" *🔗", "", result)
+            # 섹터 링크 재주입
             for sector_name, urls in sls.items():
                 lines = result_clean.split("\n")
                 for i, line in enumerate(lines):
@@ -855,6 +880,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             if f"[[LINK:{url}]]" not in line:
                                 line = line + f" [[LINK:{url}]]"
                         lines[i] = line
+                result_clean = "\n".join(lines)
+            # 코스피/코스닥 수정 시 [[LINK:url]] 마커가 본문에 남아있으면 올바른 위치로 이동
+            link_markers = re.findall(r"\[\[LINK:([^\]]+)\]\]", result_clean)
+            if link_markers and edit_type in ("코스피", "코스닥") and target:
+                # 마커를 본문에서 제거 후 해당 종목 섹션 마지막 bullet에 주입
+                result_clean = re.sub(r"\s*\[\[LINK:[^\]]+\]\]", "", result_clean)
+                lines = result_clean.split("\n")
+                in_target = False
+                last_bullet_idx = -1
+                for i, line in enumerate(lines):
+                    if line.strip() == target:
+                        in_target = True
+                    elif in_target and line.startswith("-"):
+                        last_bullet_idx = i
+                    elif in_target and line.startswith("📌"):
+                        break
+                if last_bullet_idx >= 0:
+                    for url in link_markers:
+                        lines[last_bullet_idx] = lines[last_bullet_idx] + f" [[LINK:{url}]]"
                 result_clean = "\n".join(lines)
             user_state[user_id]["last_checkpoint"] = result_clean
             html_result = convert_links_to_html(result_clean)
