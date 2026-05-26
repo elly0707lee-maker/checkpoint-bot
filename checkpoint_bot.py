@@ -881,24 +881,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 line = line + f" [[LINK:{url}]]"
                         lines[i] = line
                 result_clean = "\n".join(lines)
-            # 코스피/코스닥 수정 시 [[LINK:url]] 마커가 본문에 남아있으면 올바른 위치로 이동
-            link_markers = re.findall(r"\[\[LINK:([^\]]+)\]\]", result_clean)
-            if link_markers and edit_type in ("코스피", "코스닥") and target:
-                # 마커를 본문에서 제거 후 해당 종목 섹션 마지막 bullet에 주입
-                result_clean = re.sub(r"\s*\[\[LINK:[^\]]+\]\]", "", result_clean)
+            # 코스피/코스닥 수정 시 edit_urls만 해당 종목 마지막 bullet에 주입
+            if edit_urls and edit_type in ("코스피", "코스닥") and target:
                 lines = result_clean.split("\n")
                 in_target = False
                 last_bullet_idx = -1
                 for i, line in enumerate(lines):
                     if line.strip() == target:
                         in_target = True
-                    elif in_target and line.startswith("-"):
+                    elif in_target and line.strip().startswith("-"):
                         last_bullet_idx = i
-                    elif in_target and line.startswith("📌"):
+                    elif in_target and (line.startswith("📌") or (line.startswith("✔️"))):
                         break
                 if last_bullet_idx >= 0:
-                    for url in link_markers:
-                        lines[last_bullet_idx] = lines[last_bullet_idx] + f" [[LINK:{url}]]"
+                    for url in edit_urls:
+                        if f"[[LINK:{url}]]" not in lines[last_bullet_idx]:
+                            lines[last_bullet_idx] = lines[last_bullet_idx] + f" [[LINK:{url}]]"
                 result_clean = "\n".join(lines)
             user_state[user_id]["last_checkpoint"] = result_clean
             html_result = convert_links_to_html(result_clean)
