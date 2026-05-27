@@ -189,8 +189,11 @@ async def extract_sector_content_from_image(
     tag_value: str,
     mime_type: str = "image/jpeg"
 ) -> str | None:
-    """섹터/코스피/코스닥 태그가 걸린 상태에서 이미지를 받으면
-    종목명·현재가·등락률을 추출해 섹터 기사 형식 텍스트로 반환"""
+    """섹터/코스피/코스닥 태그 이미지 처리
+    - 신문기사/스크린샷: 핵심 내용 bullet 추출
+    - 주가 테이블: 종목명·수치 추출
+    - NXT 표: 괴리율 추출
+    자동으로 이미지 타입 판별해서 처리"""
     try:
         image_data = base64.standard_b64encode(image_bytes).decode("utf-8")
 
@@ -206,28 +209,30 @@ async def extract_sector_content_from_image(
             )
         else:
             if tag_type == "SECTOR":
-                context = f"'{tag_value}' 섹터 관련 종목 화면"
+                section = f"{tag_value} 섹터"
             elif tag_type == "KOSPI":
-                context = f"코스피 종목 '{tag_value}' 관련 화면"
+                section = f"코스피 종목 {tag_value}"
             elif tag_type == "KOSDAQ":
-                context = f"코스닥 종목 '{tag_value}' 관련 화면"
+                section = f"코스닥 종목 {tag_value}"
             else:
-                context = "시장 화면"
+                section = "시장"
 
             prompt = (
-                f"이 이미지는 {context}야.\n"
-                "이미지에 보이는 종목명(또는 티커)과 현재가, 등락률을 모두 추출해줘.\n"
-                "형식: 종목명(티커) 현재가 (등락률)\n"
-                "예시:\n"
-                "KDEF 56.25 USD (+6.68%)\n"
-                "한화에어로스페이스 85,400원 (+3.21%)\n\n"
-                "수치가 없으면 종목명만 적어도 됨.\n"
-                "설명·부연 없이 수치 목록만 나열할 것."
+                f"이 이미지는 {section} 관련 자료야.\n\n"
+                "이미지 타입에 따라 아래 중 하나로 처리해줘:\n\n"
+                "▶ 신문 기사 / 텍스트 스크린샷이면:\n"
+                "  - 핵심 내용을 bullet 2~3개로 요약\n"
+                "  - 형식: - 핵심 내용\n"
+                "  - 관련 종목이 언급되면 마지막에 '관련 종목: 종목A, 종목B' 추가\n\n"
+                "▶ 주가 테이블 / 차트이면:\n"
+                "  - 종목명(티커)과 현재가, 등락률 추출\n"
+                "  - 형식: 종목명 현재가 (등락률)\n\n"
+                "설명 없이 내용만 출력할 것."
             )
 
         response = client.messages.create(
             model="claude-opus-4-20250514",
-            max_tokens=500,
+            max_tokens=600,
             messages=[{
                 "role": "user",
                 "content": [
@@ -247,6 +252,7 @@ async def extract_sector_content_from_image(
     except Exception as e:
         logger.error(f"섹터 이미지 분석 오류: {e}")
         return None
+
 
 # ── 사용자별 상태 저장 ────────────────────────────────────
 # { user_id: { "date": "3/13", "buffer": [...], "last_checkpoint": "...",
