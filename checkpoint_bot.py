@@ -177,7 +177,7 @@ async def extract_indicators_from_image(image_bytes: bytes, mime_type: str = "im
     try:
         image_data = base64.standard_b64encode(image_bytes).decode("utf-8")
         response = client.messages.create(
-            model="claude-opus-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=500,
             messages=[{
                 "role": "user",
@@ -259,7 +259,7 @@ async def extract_sector_content_from_image(
             )
 
         response = client.messages.create(
-            model="claude-opus-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=600,
             messages=[{
                 "role": "user",
@@ -284,6 +284,30 @@ async def extract_sector_content_from_image(
 
 # ── 사용자별 상태 저장 ────────────────────────────────────
 user_state = {}
+
+
+async def ensure_user_state(user_id: int) -> dict:
+    """user_state 보장. 없으면 새로 만들면서 대시보드에서 본문 복원.
+    
+    봇 재배포되면 메모리 user_state가 다 날아가는데,
+    이때 다음 '정리해줘'가 mode=replace로 발동하면 대시보드의
+    사용자 편집을 덮어쓰는 사고가 남. 대시보드에 본문이 있으면
+    last_checkpoint로 복원해서 mode=append로 동작하게 함.
+    """
+    if user_id not in user_state:
+        today = datetime.now().strftime("%-m/%-d")
+        dashboard_content = await fetch_from_dashboard()
+        user_state[user_id] = {
+            "date": today,
+            "buffer": [],
+            "last_checkpoint": dashboard_content,  # 있으면 복원
+            "pending_tag": None,
+        }
+        if dashboard_content:
+            logger.info(f"user {user_id}: 대시보드 본문 복원 ({len(dashboard_content)}자) — 다음 정리는 append 모드로 동작")
+        else:
+            logger.info(f"user {user_id}: 대시보드 본문 없음 — 새 시작")
+    return user_state[user_id]
 
 # ── Claude 프롬프트 ────────────────────────────────────────
 SYSTEM_PROMPT = """너는 한국 경제방송 앵커의 방송 전 브리핑을 도와주는 전문 어시스턴트야.
@@ -401,7 +425,7 @@ NXT_PROMPT = """너는 NXT 괴리율 데이터를 체크포인트용으로 요�
 async def summarize_after_market(content: str) -> str:
     """시간외 특이종목 데이터를 Claude로 요약"""
     response = client.messages.create(
-        model="claude-opus-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=1000,
         system=AFTER_MARKET_PROMPT,
         messages=[{"role": "user", "content": content}],
@@ -412,7 +436,7 @@ async def summarize_after_market(content: str) -> str:
 async def summarize_nxt(content: str) -> str:
     """NXT 괴리율 데이터를 Claude로 요약"""
     response = client.messages.create(
-        model="claude-opus-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=1000,
         system=NXT_PROMPT,
         messages=[{"role": "user", "content": content}],
@@ -564,7 +588,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
             )
 
         response = client.messages.create(
-            model="claude-opus-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=2000,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
@@ -752,7 +776,7 @@ async def apply_partial_edit(checkpoint: str, edit_type: str, target: str, new_c
         instruction = f"'{target}' 항목을 찾아서 내용을 아래로 교체해줘:\n{new_content}"
 
     response = client.messages.create(
-        model="claude-opus-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=2000,
         system=EDIT_PROMPT,
         messages=[{
@@ -768,6 +792,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID != 0 and user_id != ALLOWED_USER_ID:
         await update.message.reply_text("접근 권한이 없습니다.")
         return
+
+    # 봇 재시작 후 첫 호출이면 대시보드에서 last_checkpoint 복원
+    await ensure_user_state(user_id)
 
     user_text = update.message.text or ""
     entity_urls = []
@@ -1094,9 +1121,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ALLOWED_USER_ID != 0 and user_id != ALLOWED_USER_ID:
         return
 
-    if user_id not in user_state:
-        today = datetime.now().strftime("%-m/%-d")
-        user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None, "pending_tag": None}
+    # 봇 재시작 후 첫 호출이면 대시보드에서 last_checkpoint 복원
+    await ensure_user_state(user_id)
 
     caption = (update.message.caption or "").strip()
     if caption:
