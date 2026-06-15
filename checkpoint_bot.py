@@ -954,6 +954,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             is_first = state.get("last_checkpoint") is None
             send_mode = "replace" if is_first else "append"
 
+            # ★ append 모드(조각)일 땐 "X/X Check Point✨" 헤더 줄을 빼고 보냄
+            #   (대시보드 본문에 헤더가 매번 중복되지 않게)
+            send_payload = result
+            if send_mode == "append":
+                lines = send_payload.split("\n")
+                if lines and re.match(r'^\s*\d+/\d+\s+Check\s*Point', lines[0]):
+                    send_payload = "\n".join(lines[1:]).lstrip("\n")
+
             user_state[user_id]["last_checkpoint"] = result
             user_state[user_id]["buffer"] = []
             await processing_msg.delete()
@@ -964,7 +972,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 for i in range(0, len(html_result), MAX):
                     await update.message.reply_text(html_result[i:i+MAX], parse_mode="HTML")
-            asyncio.create_task(send_to_dashboard(result, date_str, mode=send_mode))
+            asyncio.create_task(send_to_dashboard(send_payload, date_str, mode=send_mode))
         except Exception as e:
             logger.error(f"분석 오류: {e}")
             await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
