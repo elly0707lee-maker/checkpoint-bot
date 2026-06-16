@@ -719,17 +719,38 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         sig_lines = ["📡시장 시그널"]
         for sig_title, sig_content in signal_items:
             if sig_title:
-                # [[LINK:url]]을 제목 줄에 붙이기
+                # [[LINK:url]] 분리
                 link_markers = re.findall(r"\[\[LINK:[^\]]+\]\]", sig_content)
                 clean_content = re.sub(r"\s*\[\[LINK:[^\]]+\]\]", "", sig_content).strip()
                 title_line = sig_title
                 for lm in link_markers:
                     title_line += f" {lm}"
                 sig_lines.append(title_line)
-                for line in clean_content.split("\n"):
-                    line = line.strip()
-                    if line:
-                        sig_lines.append("- " + line.lstrip("- ").lstrip("• "))
+                # 내용이 길면 Claude로 요약 (200자 이상)
+                if len(clean_content) > 200:
+                    try:
+                        summary_resp = client.messages.create(
+                            model="claude-sonnet-4-6",
+                            max_tokens=300,
+                            messages=[{"role": "user", "content":
+                                f"아래 기사를 핵심 포인트 2~3줄로 요약해줘. "
+                                f"각 줄은 '- '로 시작. 설명 없이 bullet만 출력.\n\n{clean_content[:3000]}"}]
+                        )
+                        summary = summary_resp.content[0].text.strip()
+                        for line in summary.split("\n"):
+                            line = line.strip()
+                            if line:
+                                sig_lines.append(line if line.startswith("-") else "- " + line)
+                    except Exception:
+                        # 요약 실패 시 첫 줄만
+                        first = clean_content.split("\n")[0].strip()
+                        if first:
+                            sig_lines.append("- " + first[:100])
+                elif clean_content:
+                    for line in clean_content.split("\n"):
+                        line = line.strip()
+                        if line:
+                            sig_lines.append("- " + line.lstrip("- ").lstrip("• "))
             else:
                 sig_lines.append(sig_content)
         signal_block = "\n".join(sig_lines)
