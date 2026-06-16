@@ -175,7 +175,7 @@ async def extract_indicators_from_image(image_bytes: bytes, mime_type: str = "im
     try:
         image_data = base64.standard_b64encode(image_bytes).decode("utf-8")
         response = client.messages.create(
-            model="claude-opus-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=500,
             messages=[{
                 "role": "user",
@@ -261,7 +261,7 @@ async def extract_sector_content_from_image(
             )
 
         response = client.messages.create(
-            model="claude-opus-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=600,
             messages=[{
                 "role": "user",
@@ -406,7 +406,7 @@ NXT_PROMPT = """너는 NXT 괴리율 데이터를 체크포인트용으로 요�
 async def summarize_after_market(content: str) -> str:
     """시간외 특이종목 데이터를 Claude로 요약"""
     response = client.messages.create(
-        model="claude-opus-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=1000,
         system=AFTER_MARKET_PROMPT,
         messages=[{"role": "user", "content": content}],
@@ -417,7 +417,7 @@ async def summarize_after_market(content: str) -> str:
 async def summarize_nxt(content: str) -> str:
     """NXT 괴리율 데이터를 Claude로 요약"""
     response = client.messages.create(
-        model="claude-opus-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=1000,
         system=NXT_PROMPT,
         messages=[{"role": "user", "content": content}],
@@ -584,7 +584,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
             )
 
         response = client.messages.create(
-            model="claude-opus-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=2000,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
@@ -799,7 +799,7 @@ async def apply_partial_edit(checkpoint: str, edit_type: str, target: str, new_c
         instruction = f"'{target}' 항목을 찾아서 내용을 아래로 교체해줘:\n{new_content}"
 
     response = client.messages.create(
-        model="claude-opus-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=2000,
         system=EDIT_PROMPT,
         messages=[{
