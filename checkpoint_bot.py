@@ -3,7 +3,6 @@ Morning Broadcast CheckPoint Bot 🌅
 방송 전 뉴스 → 섹터/종목 자동 분류 텔레그램 봇
 + 지표 텍스트 태그 지원
 + 이미지 캡쳐 → Claude Vision 자동 인식
-+ ★ 대시보드 본문 fetch로 사용자 편집 보존 ★
 """
 
 import logging
@@ -33,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# ── 대시보드 통신 ─────────────────────────────────────────
+# ── 대시보드 전송 ─────────────────────────────────────────
 _last_dashboard_error = ""
 
 def convert_links_to_html(text: str) -> str:
@@ -54,45 +53,44 @@ def convert_links_to_html(text: str) -> str:
         text = text.replace(key, val)
     return text
 
-# ★★★ 새 함수: 대시보드 본문 가져오기 (사용자 편집 보존용) ★★★
-async def fetch_from_dashboard() -> str | None:
-    """대시보드의 현재 체크포인트 본문 가져오기.
-    사용자가 ✏️ 편집한 내용이 있으면 그것까지 포함됨.
-    실패 시 None 반환 (봇 자체 last_checkpoint로 폴백).
-    """
+async def restore_sector_links_from_dashboard() -> dict:
+    """대시보드에서 최신 체크포인트를 가져와 sector_link_store 재구성 (봇 재시작 대비)"""
     if not DASHBOARD_URL:
-        return None
-    url = DASHBOARD_URL.rstrip("/") + "/api/post/checkpoint"
+        return {}
+    fetch_url = DASHBOARD_URL.rstrip("/") + "/api/post/checkpoint"
     headers = {"X-API-Secret": DASHBOARD_API_SECRET}
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    content = data.get("content")
-                    if content and len(content.strip()) > 5:
-                        logger.info(f"대시보드 본문 fetch 성공: {len(content)}자")
-                        return content
-                    return None
-                logger.warning(f"대시보드 본문 fetch HTTP {resp.status}")
-                return None
+            async with session.get(fetch_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    return {}
+                data = await resp.json()
+                checkpoint_text = data.get("content", "")
+                if not checkpoint_text:
+                    return {}
+                sls = {}
+                for m in re.finditer(r"✔️(\S+)[^\n]*\[\[LINK:([^\]]+)\]\]", checkpoint_text):
+                    sector = m.group(1)
+                    url_val = m.group(2)
+                    if sector not in sls:
+                        sls[sector] = []
+                    if url_val not in sls[sector]:
+                        sls[sector].append(url_val)
+                logger.info(f"대시보드 복원 sector_link_store: {sls}")
+                return sls
     except Exception as e:
-        logger.error(f"대시보드 본문 fetch 오류: {e}")
-        return None
+        logger.error(f"대시보드 복원 오류: {e}")
+        return {}
 
-async def send_to_dashboard(content: str, date_str: str, mode: str = "append") -> bool:
-    """체크포인트를 대시보드 /api/post/checkpoint 로 전송.
-    
-    mode:
-      - "append": 기존 본문 끝에 조각 추가 (정리해줘 → 새 조각만)
-      - "replace": 전체 본문 덮어쓰기 (전체수정/부분수정 → 통째)
-    """
+
+async def send_to_dashboard(content: str, date_str: str) -> bool:
+    """체크포인트를 대시보드 /api/post/checkpoint 로 전송"""
     global _last_dashboard_error
     if not DASHBOARD_URL:
         _last_dashboard_error = "DASHBOARD_URL 미설정"
         return False
     url = DASHBOARD_URL.rstrip("/") + "/api/post/checkpoint"
-    payload = {"content": content, "date": date_str, "mode": mode}
+    payload = {"content": content, "date": date_str}
     headers = {
         "Content-Type": "application/json",
         "X-API-Secret": DASHBOARD_API_SECRET,
@@ -102,7 +100,7 @@ async def send_to_dashboard(content: str, date_str: str, mode: str = "append") -
             async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 body = await resp.text()
                 if resp.status == 200:
-                    logger.info(f"대시보드 전송 성공 (mode={mode})")
+                    logger.info("대시보드 전송 성공")
                     _last_dashboard_error = ""
                     return True
                 else:
@@ -177,7 +175,7 @@ async def extract_indicators_from_image(image_bytes: bytes, mime_type: str = "im
     try:
         image_data = base64.standard_b64encode(image_bytes).decode("utf-8")
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-opus-4-20250514",
             max_tokens=500,
             messages=[{
                 "role": "user",
@@ -221,7 +219,11 @@ async def extract_sector_content_from_image(
     tag_value: str,
     mime_type: str = "image/jpeg"
 ) -> str | None:
-    """섹터/코스피/코스닥 태그 이미지 처리"""
+    """섹터/코스피/코스닥 태그 이미지 처리
+    - 신문기사/스크린샷: 핵심 내용 bullet 추출
+    - 주가 테이블: 종목명·수치 추출
+    - NXT 표: 괴리율 추출
+    자동으로 이미지 타입 판별해서 처리"""
     try:
         image_data = base64.standard_b64encode(image_bytes).decode("utf-8")
 
@@ -259,7 +261,7 @@ async def extract_sector_content_from_image(
             )
 
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-opus-4-20250514",
             max_tokens=600,
             messages=[{
                 "role": "user",
@@ -283,31 +285,10 @@ async def extract_sector_content_from_image(
 
 
 # ── 사용자별 상태 저장 ────────────────────────────────────
+# { user_id: { "date": "3/13", "buffer": [...], "last_checkpoint": "...",
+#              "pending_tag": (tag_type, tag_value),
+#              "pending_indicator_image": "텍스트" } }
 user_state = {}
-
-
-async def ensure_user_state(user_id: int) -> dict:
-    """user_state 보장. 없으면 새로 만들면서 대시보드에서 본문 복원.
-    
-    봇 재배포되면 메모리 user_state가 다 날아가는데,
-    이때 다음 '정리해줘'가 mode=replace로 발동하면 대시보드의
-    사용자 편집을 덮어쓰는 사고가 남. 대시보드에 본문이 있으면
-    last_checkpoint로 복원해서 mode=append로 동작하게 함.
-    """
-    if user_id not in user_state:
-        today = datetime.now().strftime("%-m/%-d")
-        dashboard_content = await fetch_from_dashboard()
-        user_state[user_id] = {
-            "date": today,
-            "buffer": [],
-            "last_checkpoint": dashboard_content,  # 있으면 복원
-            "pending_tag": None,
-        }
-        if dashboard_content:
-            logger.info(f"user {user_id}: 대시보드 본문 복원 ({len(dashboard_content)}자) — 다음 정리는 append 모드로 동작")
-        else:
-            logger.info(f"user {user_id}: 대시보드 본문 없음 — 새 시작")
-    return user_state[user_id]
 
 # ── Claude 프롬프트 ────────────────────────────────────────
 SYSTEM_PROMPT = """너는 한국 경제방송 앵커의 방송 전 브리핑을 도와주는 전문 어시스턴트야.
@@ -425,7 +406,7 @@ NXT_PROMPT = """너는 NXT 괴리율 데이터를 체크포인트용으로 요�
 async def summarize_after_market(content: str) -> str:
     """시간외 특이종목 데이터를 Claude로 요약"""
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-opus-4-20250514",
         max_tokens=1000,
         system=AFTER_MARKET_PROMPT,
         messages=[{"role": "user", "content": content}],
@@ -436,7 +417,7 @@ async def summarize_after_market(content: str) -> str:
 async def summarize_nxt(content: str) -> str:
     """NXT 괴리율 데이터를 Claude로 요약"""
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-opus-4-20250514",
         max_tokens=1000,
         system=NXT_PROMPT,
         messages=[{"role": "user", "content": content}],
@@ -444,7 +425,10 @@ async def summarize_nxt(content: str) -> str:
     return response.content[0].text.strip()
 
 def parse_multi_tag(text: str) -> list:
-    """한 메시지에 여러 태그 블록이 있을 때 모두 분리해서 반환."""
+    """한 메시지에 여러 태그 블록이 있을 때 모두 분리해서 반환.
+    단일 태그 메시지도 그대로 동작.
+    반환: [(tag_type, tag_value, content), ...]
+    """
     TAG_START = re.compile(
         r"^(섹터|코스피|코스닥|지표|시간외|NXT|시그널)\s*/",
         re.IGNORECASE | re.MULTILINE
@@ -454,6 +438,7 @@ def parse_multi_tag(text: str) -> list:
         return [parse_user_tag(text)]
 
     blocks = []
+    # 태그 앞에 내용이 있으면 AUTO로
     if matches[0].start() > 0:
         prefix = text[:matches[0].start()].strip()
         if prefix:
@@ -469,6 +454,7 @@ def parse_multi_tag(text: str) -> list:
 
 def parse_user_tag(text: str):
     """사용자 태그 추출 — 지표/ 태그 추가"""
+    # 지표 태그
     if re.match(r"^지표\s*/\s*", text, re.IGNORECASE):
         content = re.sub(r"^지표\s*/\s*", "", text, flags=re.IGNORECASE).strip()
         return "INDICATOR", "", content
@@ -485,14 +471,20 @@ def parse_user_tag(text: str):
     if kosdaq_match:
         return "KOSDAQ", kosdaq_match.group(1).strip(), text[kosdaq_match.end():].strip()
 
+    # 시간외 태그
     if re.match(r"^시간외\s*/\s*", text, re.IGNORECASE):
         content = re.sub(r"^시간외\s*/\s*", "", text, flags=re.IGNORECASE).strip()
         return "AFTER_MARKET", "", content
 
+    # 시그널 태그 — 섹터처럼 제목/내용 분리
+    signal_match = re.match(r"^시그널\s*/\s*(.+?)[\n\r]", text + "\n", re.IGNORECASE)
+    if signal_match:
+        return "SIGNAL", signal_match.group(1).strip(), text[signal_match.end():].strip()
     if re.match(r"^시그널\s*/\s*", text, re.IGNORECASE):
         content = re.sub(r"^시그널\s*/\s*", "", text, flags=re.IGNORECASE).strip()
         return "SIGNAL", "", content
 
+    # NXT 태그
     if re.match(r"^NXT\s*/\s*", text, re.IGNORECASE):
         content = re.sub(r"^NXT\s*/\s*", "", text, flags=re.IGNORECASE).strip()
         return "NXT", "", content
@@ -520,6 +512,7 @@ def format_buffer_for_claude(buffer: list) -> str:
         elif tag_type == "AUTO":
             parts.append(f"[AUTO]\n{content}")
 
+    # 지표 섹션 맨 앞에
     if indicator_lines:
         combined_indicator = "\n".join(indicator_lines)
         parts.insert(0, f"[INDICATOR]\n{combined_indicator}")
@@ -550,7 +543,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         elif tag_type == "NXT":
             nxt_items.append(content)
         elif tag_type == "SIGNAL":
-            signal_items.append(content)
+            signal_items.append((tag_value, content))
         else:
             claude_buffer.append(item)
 
@@ -560,8 +553,10 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
     if claude_buffer or prev_checkpoint:
         structured = format_buffer_for_claude(claude_buffer)
 
+        # 버퍼에서 섹터 링크 추출 → sector_link_store에 누적 저장
         for m in re.finditer(r"\[\[LINK:([^\]]+)\]\]", structured):
             url = m.group(1)
+            # 어느 섹터인지 찾기 (SECTOR 태그 아이템에서)
             for item in claude_buffer:
                 tag_type, tag_value, item_content = item
                 if tag_type == "SECTOR" and url in item_content:
@@ -570,12 +565,13 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
                     if url not in sector_link_store[tag_value]:
                         sector_link_store[tag_value].append(url)
 
+        # Claude에는 링크 마커 없는 버전 전달
         structured_clean = re.sub(r"\s*\[\[LINK:[^\]]+\]\]", "", structured)
 
         if prev_checkpoint:
             cp_base = re.split(r"\n📌코스피|\n📌시간외|\n📌NXT", prev_checkpoint)[0]
             cp_base_clean = re.sub(r"\s*\[\[LINK:[^\]]+\]\]", "", cp_base)
-            cp_base_clean = re.sub(r" *🔗", "", cp_base_clean)
+            cp_base_clean = re.sub(r" *🔗", "", cp_base_clean)  # 전체수정 붙여넣기 시 평문 이모티콘도 제거
             user_content = (
                 f"날짜: {date_str}\n\n기존 체크포인트 (📌코스피/코스닥/시간외/NXT 섹션 제외):\n{cp_base_clean}\n\n"
                 f"---\n\n추가 내용 (반영해서 업데이트해줘. 📌코스피/📌코스닥/📌시간외/📌NXT 섹션은 출력하지 말 것):\n\n{structured_clean}"
@@ -588,19 +584,21 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
             )
 
         response = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-opus-4-20250514",
             max_tokens=2000,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_content}],
         )
         base = response.content[0].text.strip()
 
+        # sector_link_store의 링크를 섹터 헤더(✔️섹터명) 뒤에 주입
         for sector_name, urls in sector_link_store.items():
             if f"✔️{sector_name}" not in base:
                 continue
             for url in urls:
                 if f"[[LINK:{url}]]" in base:
                     continue
+                # 헤더 줄 찾기 (이미 링크가 붙어서 변형됐을 수 있으므로 ✔️섹터명으로 시작하는 줄 탐색)
                 lines = base.split("\n")
                 for i, line in enumerate(lines):
                     if line.startswith(f"✔️{sector_name}"):
@@ -610,11 +608,13 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
     else:
         base = f"{date_str} Check Point✨"
 
+    # 기존 코스피/코스닥 파싱
     existing_kospi_map = {}
     existing_kosdaq_map = {}
 
     if prev_checkpoint:
         def parse_stock_section(section_text: str) -> dict:
+            """prev_checkpoint에서 기존 종목 파싱 → {종목명: [(bullet, url), ...]}"""
             result = {}
             current_name = None
             current_lines = []
@@ -672,6 +672,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         return [f"- {b}" if not b.startswith("-") else b for b in bullets]
 
     def add_to_stock_map(items_list, stock_map):
+        """기사별 bullet+링크를 절대 유실 없이 누적 (덮어쓰기 금지)"""
         for name, c in items_list:
             link_m = re.findall(r"\[\[LINK:([^\]]+)\]\]", c)
             clean_c = re.sub(r"\[\[LINK:[^\]]+\]\]", "", c).strip()
@@ -682,6 +683,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
             if bullets:
                 stock_map[name].append((bullets[0], link_url))
             elif link_url:
+                # 크롤링 실패해도 링크는 반드시 보존
                 stock_map[name].append(("- 관련 기사", link_url))
 
     add_to_stock_map(kospi_items, existing_kospi_map)
@@ -712,14 +714,32 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
     kospi_block = build_stock_block("📌코스피", existing_kospi_map)
     kosdaq_block = build_stock_block("📌코스닥", existing_kosdaq_map)
 
+    # ── 시장 시그널 ──
     if signal_items:
-        signal_block = "📡시장 시그널\n" + "\n".join(signal_items)
+        sig_lines = ["📡시장 시그널"]
+        for sig_title, sig_content in signal_items:
+            if sig_title:
+                # [[LINK:url]]을 제목 줄에 붙이기
+                link_markers = re.findall(r"\[\[LINK:[^\]]+\]\]", sig_content)
+                clean_content = re.sub(r"\s*\[\[LINK:[^\]]+\]\]", "", sig_content).strip()
+                title_line = sig_title
+                for lm in link_markers:
+                    title_line += f" {lm}"
+                sig_lines.append(title_line)
+                for line in clean_content.split("\n"):
+                    line = line.strip()
+                    if line:
+                        sig_lines.append("- " + line.lstrip("- ").lstrip("• "))
+            else:
+                sig_lines.append(sig_content)
+        signal_block = "\n".join(sig_lines)
     elif prev_checkpoint:
         sm = re.search(r"(📡시장 시그널.*?)(?=\n📌|\n📡|\Z)", prev_checkpoint, re.DOTALL)
         signal_block = sm.group(1).strip() if sm else ""
     else:
         signal_block = ""
 
+    # 시그널은 📌Sector 바로 앞에 삽입
     result = base.strip()
     if signal_block:
         sector_markers = ["\n📌Sector", "\n📌sector", "\n📌섹터"]
@@ -737,6 +757,8 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
     if kosdaq_block:
         result += "\n\n" + kosdaq_block
 
+    # ── 시간외 특이종목 처리 ──
+    # 새 데이터가 있으면 Claude로 요약, 없으면 기존 prev 섹션 유지
     if after_market_items:
         combined_am = "\n\n".join(after_market_items)
         after_market_block = "📌시간외 특이종목\n\n" + combined_am
@@ -746,6 +768,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
         if am_m:
             result += "\n\n" + am_m.group(1).strip()
 
+    # ── NXT 괴리율 처리 ──
     if nxt_items:
         combined_nxt = "\n\n".join(nxt_items)
         nxt_block = await summarize_nxt(combined_nxt)
@@ -776,7 +799,7 @@ async def apply_partial_edit(checkpoint: str, edit_type: str, target: str, new_c
         instruction = f"'{target}' 항목을 찾아서 내용을 아래로 교체해줘:\n{new_content}"
 
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-opus-4-20250514",
         max_tokens=2000,
         system=EDIT_PROMPT,
         messages=[{
@@ -793,10 +816,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("접근 권한이 없습니다.")
         return
 
-    # 봇 재시작 후 첫 호출이면 대시보드에서 last_checkpoint 복원
-    await ensure_user_state(user_id)
-
     user_text = update.message.text or ""
+    # 텔레그램 entities에서 URL 추출 (포워드 메시지 링크 포함)
     entity_urls = []
     msg = update.message
     all_entities = list(msg.entities or []) + list(msg.caption_entities or [])
@@ -842,7 +863,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id not in user_state:
             today = datetime.now().strftime("%-m/%-d")
             user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None, "pending_tag": None}
+        # 평문 🔗 제거 후 sector_link_store에서 링크 즉시 재주입
         clean_cp = re.sub(r" *🔗", "", new_checkpoint)
+        if not user_state[user_id].get("sector_link_store"):
+            user_state[user_id]["sector_link_store"] = await restore_sector_links_from_dashboard()
         sls = user_state[user_id].get("sector_link_store", {})
         for sector_name, urls in sls.items():
             lines = clean_cp.split("\n")
@@ -860,7 +884,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         date_str = date_match.group(1) if date_match else datetime.now().strftime("%-m/%-d")
         if date_match:
             user_state[user_id]["date"] = date_str
-        asyncio.create_task(send_to_dashboard(clean_cp, date_str, mode="replace"))
+        asyncio.create_task(send_to_dashboard(clean_cp, date_str))
         await update.message.reply_text("✅ 전체수정 완료! 베이스로 저장했어요.", parse_mode="HTML")
         return
 
@@ -871,21 +895,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = edit_match.group(2).strip()
         new_content = edit_match.group(3).strip()
         state = user_state.get(user_id)
-
-        # ★★★ 변경: 대시보드 본문 가져와서 베이스로 사용 (사용자 편집 보존) ★★★
-        dashboard_current = await fetch_from_dashboard()
-        base_checkpoint = dashboard_current or (state.get("last_checkpoint") if state else None)
-
-        if not base_checkpoint:
+        if not state or not state.get("last_checkpoint"):
             await update.message.reply_text("수정할 체크포인트가 없어요! 먼저 체크포인트를 만들어 주세요.")
             return
-        if not state:
-            today = datetime.now().strftime("%-m/%-d")
-            user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": base_checkpoint, "pending_tag": None}
-            state = user_state[user_id]
-
         processing_msg = await update.message.reply_text(f"⏳ {edit_type}/{target} 수정 중...")
         try:
+            # 수정 내용에 URL 있으면 크롤링 + 링크 저장
             edit_urls = extract_urls(new_content)
             if edit_urls:
                 fetched_parts = []
@@ -896,6 +911,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     new_content = new_content.replace(eu, "").strip()
                 if fetched_parts:
                     new_content = new_content + "\n" + "\n".join(fetched_parts)
+                # 링크 저장: 섹터면 sector_link_store, 코스피/코스닥이면 edit_url_map
                 if edit_type == "섹터" and target:
                     if "sector_link_store" not in user_state[user_id]:
                         user_state[user_id]["sector_link_store"] = {}
@@ -906,11 +922,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if eu not in sls[target]:
                             sls[target].append(eu)
                 elif edit_type in ("코스피", "코스닥") and target:
+                    # 수정 후 해당 종목 줄에 링크 달기 위해 임시 저장
                     new_content = new_content + "\n" + "\n".join(f"[[LINK:{eu}]]" for eu in edit_urls)
-            # ★ base_checkpoint(대시보드 본문) 기준으로 수정 → 사용자 편집 보존
-            result = await apply_partial_edit(base_checkpoint, edit_type, target, new_content)
+            result = await apply_partial_edit(state["last_checkpoint"], edit_type, target, new_content)
+            # 부분수정 후 sector_link_store 링크 재주입
             sls = user_state[user_id].get("sector_link_store", {})
             result_clean = re.sub(r" *🔗", "", result)
+            # 섹터 링크 재주입
             for sector_name, urls in sls.items():
                 lines = result_clean.split("\n")
                 for i, line in enumerate(lines):
@@ -920,6 +938,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                 line = line + f" [[LINK:{url}]]"
                         lines[i] = line
                 result_clean = "\n".join(lines)
+            # 코스피/코스닥 수정 시 edit_urls만 해당 종목 마지막 bullet에 주입
             if edit_urls and edit_type in ("코스피", "코스닥") and target:
                 lines = result_clean.split("\n")
                 in_target = False
@@ -937,9 +956,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             lines[last_bullet_idx] = lines[last_bullet_idx] + f" [[LINK:{url}]]"
                 result_clean = "\n".join(lines)
             user_state[user_id]["last_checkpoint"] = result_clean
-            # ★ 대시보드에도 자동 전송
-            date_str = user_state[user_id].get("date", datetime.now().strftime("%-m/%-d"))
-            asyncio.create_task(send_to_dashboard(result_clean, date_str, mode="replace"))
             html_result = convert_links_to_html(result_clean)
             await processing_msg.delete()
             if len(html_result) <= 4000:
@@ -961,45 +977,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not state or not state["buffer"]:
             await update.message.reply_text("아직 받은 내용이 없어요! 기사나 뉴스를 먼저 보내주세요 📋")
             return
-        processing_msg = await update.message.reply_text("⏳ 조각 정리 중...")
+        processing_msg = await update.message.reply_text("⏳ 통합 정리 중...")
         try:
             date_str = state.get("date", datetime.now().strftime("%-m/%-d"))
-
-            # ★ 조각 방식: 새 buffer만 정리. prev_checkpoint=None.
-            #   대시보드의 기존 본문은 손 안 댐 (사용자 편집 절대 보존).
-            if "sector_link_store" not in user_state[user_id]:
-                user_state[user_id]["sector_link_store"] = {}
+            # sector_link_store를 user_state에서 가져와 전달 (누적 유지)
+            if not user_state[user_id].get("sector_link_store"):
+                user_state[user_id]["sector_link_store"] = await restore_sector_links_from_dashboard()
             sls = user_state[user_id]["sector_link_store"]
             result = await build_checkpoint(
                 state["buffer"],
                 date_str,
-                prev_checkpoint=None,
+                prev_checkpoint=state.get("last_checkpoint"),
                 sector_link_store=sls
             )
-
-            # 첫 정리(봇 첫 출발)면 replace, 이후엔 append
-            is_first = state.get("last_checkpoint") is None
-            send_mode = "replace" if is_first else "append"
-
-            # ★ append 모드(조각)일 땐 "X/X Check Point✨" 헤더 줄을 빼고 보냄
-            #   (대시보드 본문에 헤더가 매번 중복되지 않게)
-            send_payload = result
-            if send_mode == "append":
-                lines = send_payload.split("\n")
-                if lines and re.match(r'^\s*\d+/\d+\s+Check\s*Point', lines[0]):
-                    send_payload = "\n".join(lines[1:]).lstrip("\n")
-
+            # build_checkpoint가 sls를 in-place로 업데이트하므로 자동 반영
             user_state[user_id]["last_checkpoint"] = result
             user_state[user_id]["buffer"] = []
             await processing_msg.delete()
+            # 링크 마커 → HTML 변환
             html_result = convert_links_to_html(result)
+            # 4096자 초과 시 분할 전송
             MAX = 4000
             if len(html_result) <= MAX:
                 await update.message.reply_text(html_result, parse_mode="HTML")
             else:
                 for i in range(0, len(html_result), MAX):
                     await update.message.reply_text(html_result[i:i+MAX], parse_mode="HTML")
-            asyncio.create_task(send_to_dashboard(send_payload, date_str, mode=send_mode))
+            # ── 대시보드 자동 전송 (백그라운드) ──
+            asyncio.create_task(send_to_dashboard(result, date_str))
         except Exception as e:
             logger.error(f"분석 오류: {e}")
             await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
@@ -1019,6 +1024,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if has_url:
         processing_msg = await update.message.reply_text("🔍 링크 읽는 중...")
         enriched_text, found_urls = await enrich_text_with_url(text)
+        # entity_urls 중 아직 안 처리된 것 추가
         for eu in entity_urls:
             if eu not in found_urls:
                 fetched = await fetch_url_text(eu)
@@ -1043,7 +1049,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "INDICATOR": "📊지표",
             "AFTER_MARKET": "📌시간외 특이종목",
             "NXT": "📌NXT 괴리율",
-            "SIGNAL": "📡시장 시그널",
+        "SIGNAL": "📡시장 시그널",
         }
         label = tag_display.get(tag_type, tag_value)
         is_append = bool(user_state[user_id].get("last_checkpoint"))
@@ -1061,6 +1067,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
              "AFTER_MARKET": "📌시간외 특이종목", "NXT": "📌NXT 괴리율", "AUTO": "🔍자동분류"}
         return m.get(tt, tv)
 
+    # ── 단일 태그-only → pending or 재태깅 ──
     if len(parsed_blocks) == 1:
         tag_type, tag_value, content = parsed_blocks[0]
         is_tag_only = (
@@ -1086,14 +1093,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             return
 
+    # ── 멀티 태그 or 단일 태그+내용 → 전체 버퍼에 추가 ──
     added_labels = []
     pending = user_state[user_id].get("pending_tag")
     for tag_type, tag_value, content in parsed_blocks:
         if not content.strip():
             continue
+        # AUTO인데 pending 태그 있으면 pending으로 덮어씌우기
         if tag_type == "AUTO" and pending:
             tag_type, tag_value = pending
-            pending = None
+            pending = None  # 한 번만 적용
         user_state[user_id]["buffer"].append((tag_type, tag_value, content))
         added_labels.append(get_label(tag_type, tag_value))
 
@@ -1116,14 +1125,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── 이미지 핸들러 ─────────────────────────────────────────
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """이미지 수신 → pending 태그 유무에 따라 분기"""
+    """이미지 수신 → pending 태그 유무에 따라 분기
+    - pending 태그 없음: 지표(INDICATOR)로 추출
+    - pending 태그 있음(SECTOR/KOSPI/KOSDAQ): 종목·수치 추출 후 해당 태그로 저장
+    """
     user_id = update.effective_user.id
     if ALLOWED_USER_ID != 0 and user_id != ALLOWED_USER_ID:
         return
 
-    # 봇 재시작 후 첫 호출이면 대시보드에서 last_checkpoint 복원
-    await ensure_user_state(user_id)
+    if user_id not in user_state:
+        today = datetime.now().strftime("%-m/%-d")
+        user_state[user_id] = {"date": today, "buffer": [], "last_checkpoint": None, "pending_tag": None}
 
+    # 캡션에 태그가 있으면 우선 적용 (예: 캡션 = "섹터/방산")
     caption = (update.message.caption or "").strip()
     if caption:
         cap_type, cap_value, _ = parse_user_tag(caption)
@@ -1144,6 +1158,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with session.get(file.file_path) as resp:
                 image_bytes = await resp.read()
 
+        # ── 분기: pending 태그가 있으면 섹터/종목 내용 추출 ──
         if pending and pending[0] in ("SECTOR", "KOSPI", "KOSDAQ", "NXT"):
             tag_type, tag_value = pending
             extracted = await extract_sector_content_from_image(image_bytes, tag_type, tag_value, "image/jpeg")
@@ -1173,6 +1188,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"'정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
             )
 
+        # ── 기본: pending 태그 없으면 지표 추출 ──
         else:
             extracted = await extract_indicators_from_image(image_bytes, "image/jpeg")
 
@@ -1234,7 +1250,6 @@ NXT/
 
 ✅ 정리
 정리해줘
-(대시보드의 현재 본문을 가져와서 베이스로 사용 — 사용자 편집 보존)
 
 ✏️ 부분수정
 수정/코스피/LG디스플레이
@@ -1254,6 +1269,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("help", help_command))
+    # 이미지 핸들러 추가
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("🚀 CheckPoint Bot 시작!")
