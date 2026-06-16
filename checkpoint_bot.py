@@ -715,6 +715,15 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
     kosdaq_block = build_stock_block("📌코스닥", existing_kosdaq_map)
 
     # ── 시장 시그널 ──
+    # 기존 prev_checkpoint의 시그널 내용을 앞에 누적
+    if signal_items and prev_checkpoint:
+        sm = re.search(r"📡시장 시그널\n(.*?)(?=\n📌|\n📊|\n🇺🇸|\Z)", prev_checkpoint, re.DOTALL)
+        if sm:
+            existing_signal_text = sm.group(1).strip()
+            if existing_signal_text:
+                # 기존 내용을 (None, raw_line) 쌍으로 앞에 삽입
+                existing_lines = [l for l in existing_signal_text.split("\n") if l.strip()]
+                signal_items = [("", "\n".join(existing_lines))] + signal_items
     if signal_items:
         sig_lines = ["📡시장 시그널"]
         for sig_title, sig_content in signal_items:
