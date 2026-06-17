@@ -886,7 +886,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── 1) 새 체크포인트 시작 ──
     new_session_match = re.search(
-        r"(\d{1,2}/\d{1,2})\s*(체크포인트|checkpoint)\s*(생성|시작|열어|만들어)",
+        r"(\d{1,2}/\d{1,2})일?\s*(체크포인트|checkpoint)\s*(생성|시작|열어|만들어|새로)",
         text, re.IGNORECASE
     )
     if new_session_match:
