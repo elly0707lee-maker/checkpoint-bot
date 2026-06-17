@@ -891,7 +891,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if new_session_match:
         date_str = new_session_match.group(1)
-        user_state[user_id] = {"date": date_str, "buffer": [], "last_checkpoint": None, "pending_tag": None}
+        user_state[user_id] = {"date": date_str, "buffer": [], "last_checkpoint": "", "pending_tag": None, "sector_link_store": {}}
         await update.message.reply_text(
             f"📅 {date_str} 체크포인트 새로 시작!\n"
             f"태그 예시:\n"
@@ -1031,8 +1031,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             date_str = state.get("date", datetime.now().strftime("%-m/%-d"))
             # sector_link_store를 user_state에서 가져와 전달 (누적 유지)
-            # last_checkpoint 없으면 대시보드에서 복원 (봇 재시작 대비)
-            if not state.get("last_checkpoint"):
+            # last_checkpoint가 None이면 대시보드에서 복원 (봇 재시작 대비)
+            # ""(빈 문자열)은 의도적 초기화이므로 복원하지 않음
+            if state.get("last_checkpoint") is None:
                 restored_cp = await restore_checkpoint_from_dashboard()
                 if restored_cp:
                     user_state[user_id]["last_checkpoint"] = restored_cp
