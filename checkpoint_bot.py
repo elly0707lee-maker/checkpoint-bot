@@ -53,6 +53,24 @@ def convert_links_to_html(text: str) -> str:
         text = text.replace(key, val)
     return text
 
+async def restore_checkpoint_from_dashboard() -> str:
+    """봇 재시작 후 대시보드에서 마지막 체크포인트 복원"""
+    if not DASHBOARD_URL:
+        return ""
+    fetch_url = DASHBOARD_URL.rstrip("/") + "/api/post/checkpoint"
+    headers = {"X-API-Secret": DASHBOARD_API_SECRET}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(fetch_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    return ""
+                data = await resp.json()
+                return data.get("content", "")
+    except Exception as e:
+        logger.error(f"체크포인트 복원 오류: {e}")
+        return ""
+
+
 async def restore_sector_links_from_dashboard() -> dict:
     """대시보드에서 최신 체크포인트를 가져와 sector_link_store 재구성 (봇 재시작 대비)"""
     if not DASHBOARD_URL:
@@ -734,7 +752,7 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
                 title_line = sig_title
                 for lm in link_markers:
                     title_line += f" {lm}"
-                sig_lines.append(title_line)
+                sig_lines.append("☑️ " + title_line)
                 # 내용이 길면 Claude로 요약 (200자 이상)
                 if len(clean_content) > 200:
                     try:
@@ -751,7 +769,6 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
                             if line:
                                 sig_lines.append(line if line.startswith("-") else "- " + line)
                     except Exception:
-                        # 요약 실패 시 첫 줄만
                         first = clean_content.split("\n")[0].strip()
                         if first:
                             sig_lines.append("- " + first[:100])
@@ -761,7 +778,10 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
                         if line:
                             sig_lines.append("- " + line.lstrip("- ").lstrip("• "))
             else:
-                sig_lines.append(sig_content)
+                # 기존 저장된 내용 (이미 포맷된 텍스트) 그대로 삽입
+                for line in sig_content.split("\n"):
+                    if line.strip():
+                        sig_lines.append(line)
         signal_block = "\n".join(sig_lines)
     elif prev_checkpoint:
         sm = re.search(r"(📡시장 시그널.*?)(?=\n📌|\n📡|\Z)", prev_checkpoint, re.DOTALL)
@@ -1011,6 +1031,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             date_str = state.get("date", datetime.now().strftime("%-m/%-d"))
             # sector_link_store를 user_state에서 가져와 전달 (누적 유지)
+            # last_checkpoint 없으면 대시보드에서 복원 (봇 재시작 대비)
+            if not state.get("last_checkpoint"):
+                restored_cp = await restore_checkpoint_from_dashboard()
+                if restored_cp:
+                    user_state[user_id]["last_checkpoint"] = restored_cp
+
             if not user_state[user_id].get("sector_link_store"):
                 user_state[user_id]["sector_link_store"] = await restore_sector_links_from_dashboard()
             sls = user_state[user_id]["sector_link_store"]
