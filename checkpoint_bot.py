@@ -1316,8 +1316,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tag_type, tag_value = pending
         content = enriched_text
         user_state[user_id]["pending_tag"] = None
-        user_state[user_id]["buffer"].append((tag_type, tag_value, content))
-        count = len(user_state[user_id]["buffer"])
+        if user_state[user_id].get("last_checkpoint") is None:
+            restored = await restore_checkpoint_from_dashboard()
+            user_state[user_id]["last_checkpoint"] = restored or ""
+        if "sector_link_store" not in user_state[user_id]:
+            user_state[user_id]["sector_link_store"] = await restore_sector_links_from_dashboard()
+        date_str_now = user_state[user_id].get("date", datetime.now().strftime("%-m/%-d"))
+        new_cp = await instant_merge(
+            user_state[user_id].get("last_checkpoint", ""),
+            tag_type, tag_value, content,
+            user_state[user_id]["sector_link_store"], date_str_now
+        )
+        user_state[user_id]["last_checkpoint"] = new_cp
+        asyncio.create_task(send_to_dashboard(new_cp, date_str_now))
+        count = 1
         tag_display = {
             "SECTOR": f"✔️섹터/{tag_value}",
             "KOSPI": f"📌코스피/{tag_value}",
@@ -1329,11 +1341,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "SIGNAL": "📡시장 시그널",
         }
         label = tag_display.get(tag_type, tag_value)
-        is_append = bool(user_state[user_id].get("last_checkpoint"))
-        mode = "추가" if is_append else "누적"
-        await update.message.reply_text(
-            f"✅ {label} 기사 묶었어요! ({count}개 {mode}) '정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
-        )
+        await update.message.reply_text(f"✅ {label} → 대시보드 업데이트됨")
         return
 
     parsed_blocks = parse_multi_tag(enriched_text)
@@ -1448,12 +1456,20 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await processing_msg.edit_text("❌ 이미지에서 내용을 읽지 못했어요. 다시 시도해주세요.")
                 return
 
-            user_state[user_id]["buffer"].append((tag_type, tag_value, extracted))
             user_state[user_id]["pending_tag"] = None
-            count = len(user_state[user_id]["buffer"])
-            is_append = bool(user_state[user_id].get("last_checkpoint"))
-            mode = "추가" if is_append else "누적"
-
+            if user_state[user_id].get("last_checkpoint") is None:
+                restored = await restore_checkpoint_from_dashboard()
+                user_state[user_id]["last_checkpoint"] = restored or ""
+            if "sector_link_store" not in user_state[user_id]:
+                user_state[user_id]["sector_link_store"] = await restore_sector_links_from_dashboard()
+            date_str_now = user_state[user_id].get("date", datetime.now().strftime("%-m/%-d"))
+            new_cp = await instant_merge(
+                user_state[user_id].get("last_checkpoint", ""),
+                tag_type, tag_value, extracted,
+                user_state[user_id]["sector_link_store"], date_str_now
+            )
+            user_state[user_id]["last_checkpoint"] = new_cp
+            asyncio.create_task(send_to_dashboard(new_cp, date_str_now))
             tag_display = {
                 "SECTOR": f"✔️섹터/{tag_value}",
                 "KOSPI": f"📌코스피/{tag_value}",
@@ -1461,12 +1477,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "NXT": "📌NXT 괴리율",
             }
             label = tag_display.get(tag_type, tag_value)
-
             await processing_msg.delete()
             await update.message.reply_text(
-                f"✅ {label} 이미지 저장 완료! ({count}개 {mode})\n\n"
-                f"📷 인식 결과:\n{extracted}\n\n"
-                f"'정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
+                f"✅ {label} → 대시보드 업데이트됨\n\n"
+                f"📷 인식 결과:\n{extracted}"
             )
 
         # ── 기본: pending 태그 없으면 지표 추출 ──
@@ -1477,18 +1491,24 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await processing_msg.edit_text("❌ 이미지에서 지표를 읽지 못했어요. 다시 시도해주세요.")
                 return
 
-            user_state[user_id]["buffer"].append(("INDICATOR", "", extracted))
-            count = len(user_state[user_id]["buffer"])
-            is_append = bool(user_state[user_id].get("last_checkpoint"))
-            mode = "추가" if is_append else "누적"
-
+            if user_state[user_id].get("last_checkpoint") is None:
+                restored = await restore_checkpoint_from_dashboard()
+                user_state[user_id]["last_checkpoint"] = restored or ""
+            if "sector_link_store" not in user_state[user_id]:
+                user_state[user_id]["sector_link_store"] = {}
+            date_str_now = user_state[user_id].get("date", datetime.now().strftime("%-m/%-d"))
+            new_cp = await instant_merge(
+                user_state[user_id].get("last_checkpoint", ""),
+                "INDICATOR", "", extracted,
+                user_state[user_id]["sector_link_store"], date_str_now
+            )
+            user_state[user_id]["last_checkpoint"] = new_cp
+            asyncio.create_task(send_to_dashboard(new_cp, date_str_now))
             await processing_msg.delete()
             await update.message.reply_text(
-                f"✅ 📊지표 저장 완료! ({count}개 {mode})\n\n"
-                f"📊지표\n{extracted}\n\n"
-                f"'정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
+                f"✅ 📊지표 → 대시보드 업데이트됨\n\n"
+                f"📊지표\n{extracted}"
             )
-
     except Exception as e:
         logger.error(f"이미지 처리 오류: {e}")
         await processing_msg.edit_text(f"❌ 오류: {str(e)[:100]}")
