@@ -541,6 +541,226 @@ def format_buffer_for_claude(buffer: list) -> str:
 
     return "\n\n---\n\n".join(parts)
 
+
+# ────────────────────────────────────────────────────────
+# 즉시 대시보드 병합 (버퍼/정리해줘 없이 조각 즉시 반영)
+# ────────────────────────────────────────────────────────
+
+def _parse_stock_map(section_text: str) -> dict:
+    result = {}
+    current_name = None
+    current_lines = []
+    for line in section_text.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("-"):
+            if current_name is not None:
+                link_m = re.search(r"\[\[LINK:([^\]]+)\]\]", line)
+                clean = re.sub(r"\[\[LINK:[^\]]+\]\]", "", line).strip()
+                url = link_m.group(1) if link_m else None
+                current_lines.append((clean, url))
+        else:
+            if current_name is not None:
+                result[current_name] = current_lines
+            current_name = line
+            current_lines = []
+    if current_name is not None:
+        result[current_name] = current_lines
+    return result
+
+def _summarize_bullets(content: str) -> list:
+    content = content.replace("[기사내용]", "").strip()
+    seen = set()
+    lines = []
+    skip_keywords = ["기자 구독", "구독하기", "Forwarded from", "today at",
+                     "naver.com", "hankyung.com", "zdnet", "2026.0", "2025.0",
+                     "글자크기", "기사 스크랩", "스크랩", "인쇄", "공유", "댓글",
+                     "로그인", "회원가입", "font", "Font"]
+    for l in content.split("\n"):
+        l = l.strip()
+        if not l or l.startswith("http"):
+            continue
+        if any(sk in l for sk in skip_keywords):
+            continue
+        korean = sum(1 for c in l if "\uAC00" <= c <= "\uD7A3")
+        if korean < 2 and len(l) < 20:
+            continue
+        key = l.replace("-", "").strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(l)
+    bullets = [l for l in lines if len(l) > 5][:2]
+    return [f"- {b}" if not b.startswith("-") else b for b in bullets]
+
+def _build_stock_block(header: str, stock_map: dict) -> str:
+    if not stock_map:
+        return ""
+    items = []
+    for name, bullets in stock_map.items():
+        item_lines = [str(name)]
+        for entry in bullets:
+            if isinstance(entry, tuple) and len(entry) == 2:
+                text, url = str(entry[0]), entry[1]
+                line = text if text.startswith("-") else "- " + text
+                if url:
+                    line += f" [[LINK:{url}]]"
+            elif isinstance(entry, str):
+                line = entry if entry.startswith("-") else "- " + entry
+            else:
+                continue
+            item_lines.append(line)
+        items.append("\n".join(item_lines))
+    return header + "\n" + "\n\n".join(items)
+
+async def _claude_summarize(text: str) -> str:
+    """긴 텍스트를 Claude로 요약"""
+    try:
+        resp = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=300,
+            messages=[{"role": "user", "content":
+                f"아래 기사를 핵심 포인트 2~3줄로 요약해줘. 각 줄은 '- '로 시작. 설명 없이 bullet만.\n\n{text[:3000]}"}]
+        )
+        return resp.content[0].text.strip()
+    except Exception:
+        return text
+
+async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: str,
+                        sector_link_store: dict, date_str: str) -> str:
+    """새 조각을 체크포인트에 즉시 병합"""
+    if not prev_cp:
+        prev_cp = f"{date_str} Check Point✨"
+
+    link_urls = re.findall(r"\[\[LINK:([^\]]+)\]\]", content)
+    clean_c = re.sub(r"\s*\[\[LINK:[^\]]+\]\]", "", content).strip()
+
+    if tag_type in ("KOSPI", "KOSDAQ"):
+        header = "📌코스피" if tag_type == "KOSPI" else "📌코스닥"
+        m = re.search(rf"{re.escape(header)}\n(.*?)(?=\n📌|\n📡|\Z)", prev_cp, re.DOTALL)
+        stock_map = _parse_stock_map(m.group(1)) if m else {}
+
+        bullets = _summarize_bullets(clean_c)
+        link_url = link_urls[0] if link_urls else None
+        if tag_value not in stock_map:
+            stock_map[tag_value] = []
+        if bullets:
+            stock_map[tag_value].append((bullets[0], link_url))
+        elif link_url:
+            stock_map[tag_value].append(("- 관련 기사", link_url))
+
+        new_block = _build_stock_block(header, stock_map)
+        if m:
+            prev_cp = prev_cp[:m.start()] + new_block + prev_cp[m.end():]
+        else:
+            prev_cp = prev_cp.rstrip() + "\n" + new_block
+        return prev_cp
+
+    elif tag_type == "SECTOR":
+        if tag_value and link_urls:
+            if tag_value not in sector_link_store:
+                sector_link_store[tag_value] = []
+            for url in link_urls:
+                if url not in sector_link_store[tag_value]:
+                    sector_link_store[tag_value].append(url)
+
+        if len(clean_c) > 200:
+            clean_c = await _claude_summarize(clean_c)
+
+        title_line = f"✔️{tag_value}"
+        for url in link_urls:
+            title_line += f" [[LINK:{url}]]"
+        new_entry = title_line + ("\n" + clean_c if clean_c else "")
+
+        sec_m = re.search(r"(📌Sector\n?)(.*?)(?=\n📌코스피|\n📌코스닥|\n📌시간외|\n📌NXT|\Z)",
+                          prev_cp, re.DOTALL)
+        if sec_m:
+            body = sec_m.group(2).rstrip()
+            pat = rf"✔️{re.escape(tag_value)}[^\n]*\n(?:.*?\n)*?(?=\n✔️|\Z)"
+            if f"✔️{tag_value}" in body:
+                body = re.sub(pat, new_entry + "\n", body, flags=re.DOTALL).rstrip()
+            else:
+                body = body + ("\n\n" if body else "") + new_entry
+            prev_cp = prev_cp[:sec_m.start()] + "📌Sector\n" + body + prev_cp[sec_m.end():]
+        else:
+            ins = re.search(r"\n📌코스피|\n📌코스닥|\Z", prev_cp)
+            pos = ins.start() if ins and ins.group() != "" else len(prev_cp)
+            prev_cp = prev_cp[:pos] + "\n📌Sector\n" + new_entry + prev_cp[pos:]
+
+        for sname, urls in sector_link_store.items():
+            for url in urls:
+                marker = f"[[LINK:{url}]]"
+                if marker not in prev_cp:
+                    lines = prev_cp.split("\n")
+                    for i, line in enumerate(lines):
+                        if line.startswith(f"✔️{sname}") and marker not in line:
+                            lines[i] = line + f" {marker}"
+                            break
+                    prev_cp = "\n".join(lines)
+        return prev_cp
+
+    elif tag_type == "SIGNAL":
+        if len(clean_c) > 200:
+            clean_c = await _claude_summarize(clean_c)
+
+        title_line = (f"☑️ {tag_value}" if tag_value else "")
+        for url in link_urls:
+            title_line += f" [[LINK:{url}]]"
+        new_entry = (title_line + "\n" + clean_c) if title_line else clean_c
+
+        sig_m = re.search(r"📡시장 시그널\n?(.*?)(?=\n📌Sector|\n📌코스피|\n📌코스닥|\Z)",
+                          prev_cp, re.DOTALL)
+        if sig_m:
+            body = sig_m.group(1).rstrip()
+            new_body = body + ("\n\n" if body else "") + new_entry
+            prev_cp = prev_cp[:sig_m.start()] + "📡시장 시그널\n" + new_body + prev_cp[sig_m.end():]
+        else:
+            ins = re.search(r"\n📌Sector|\n📌코스피|\Z", prev_cp)
+            pos = ins.start() if ins and ins.group() != "" else len(prev_cp)
+            prev_cp = prev_cp[:pos] + "\n📡시장 시그널\n" + new_entry + prev_cp[pos:]
+        return prev_cp
+
+    elif tag_type == "INDICATOR":
+        ind_m = re.search(r"📊지표\n?(.*?)(?=\n🇺🇸|\n📡|\n📌|\Z)", prev_cp, re.DOTALL)
+        new_block = "📊지표\n" + clean_c
+        if ind_m:
+            prev_cp = prev_cp[:ind_m.start()] + new_block + prev_cp[ind_m.end():]
+        else:
+            prev_cp = new_block + "\n\n" + prev_cp
+        return prev_cp
+
+    elif tag_type == "US_MARKET":
+        usm_m = re.search(r"🇺🇸美증시 마감\n?(.*?)(?=\n📡|\n📌|\Z)", prev_cp, re.DOTALL)
+        new_block = "🇺🇸美증시 마감\n" + clean_c
+        if usm_m:
+            prev_cp = prev_cp[:usm_m.start()] + new_block + prev_cp[usm_m.end():]
+        else:
+            ins = re.search(r"\n📡|\n📌|\Z", prev_cp)
+            pos = ins.start() if ins and ins.group() != "" else len(prev_cp)
+            prev_cp = prev_cp[:pos] + "\n" + new_block + prev_cp[pos:]
+        return prev_cp
+
+    elif tag_type == "AFTER_MARKET":
+        am_m = re.search(r"📌시간외 특이종목\n?(.*?)(?=\n📌NXT|\Z)", prev_cp, re.DOTALL)
+        new_block = "📌시간외 특이종목\n" + clean_c
+        if am_m:
+            prev_cp = prev_cp[:am_m.start()] + new_block + prev_cp[am_m.end():]
+        else:
+            prev_cp = prev_cp.rstrip() + "\n" + new_block
+        return prev_cp
+
+    elif tag_type == "NXT":
+        nxt_m = re.search(r"📌NXT 괴리율\n?(.*?)(?=\Z)", prev_cp, re.DOTALL)
+        new_block = "📌NXT 괴리율\n" + clean_c
+        if nxt_m:
+            prev_cp = prev_cp[:nxt_m.start()] + new_block + prev_cp[nxt_m.end():]
+        else:
+            prev_cp = prev_cp.rstrip() + "\n" + new_block
+        return prev_cp
+
+    return prev_cp
+
 async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = None, sector_link_store: dict = None) -> str:
     """체크포인트 생성. KOSPI/KOSDAQ/AFTER_MARKET/NXT는 코드에서 직접 처리."""
     claude_buffer = []
@@ -1160,24 +1380,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tag_type == "AUTO" and pending:
             tag_type, tag_value = pending
             pending = None  # 한 번만 적용
-        user_state[user_id]["buffer"].append((tag_type, tag_value, content))
+        # last_checkpoint 없으면 대시보드에서 복원
+        if user_state[user_id].get("last_checkpoint") is None:
+            restored = await restore_checkpoint_from_dashboard()
+            user_state[user_id]["last_checkpoint"] = restored or ""
+        if "sector_link_store" not in user_state[user_id]:
+            user_state[user_id]["sector_link_store"] = await restore_sector_links_from_dashboard()
+
+        state = user_state[user_id]
+        date_str_now = state.get("date", datetime.now().strftime("%-m/%-d"))
+        sls = state["sector_link_store"]
+        new_cp = await instant_merge(
+            state.get("last_checkpoint", ""), tag_type, tag_value, content, sls, date_str_now
+        )
+        user_state[user_id]["last_checkpoint"] = new_cp
+        asyncio.create_task(send_to_dashboard(new_cp, date_str_now))
         added_labels.append(get_label(tag_type, tag_value))
 
     user_state[user_id]["pending_tag"] = None
 
     if added_labels:
-        count = len(user_state[user_id]["buffer"])
-        is_append = bool(user_state[user_id].get("last_checkpoint"))
-        mode = "추가" if is_append else "누적"
-        if len(added_labels) == 1:
-            await update.message.reply_text(
-                f"✅ {added_labels[0]} ({count}개 {mode}) '정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
-            )
-        else:
-            labels_str = "\n".join(f"  · {l}" for l in added_labels)
-            await update.message.reply_text(
-                f"✅ {len(added_labels)}개 태그 한꺼번에 저장! ({count}개 {mode})\n{labels_str}\n\n'정리해줘' 하시면 {'업데이트' if is_append else '정리'}할게요!"
-            )
+        labels_str = ", ".join(added_labels)
+        await update.message.reply_text(f"✅ {labels_str} → 대시보드 업데이트됨")
 
 
 # ── 이미지 핸들러 ─────────────────────────────────────────
