@@ -119,8 +119,10 @@ async def fetch_fresh_state(user_id: int):
 
 async def send_to_dashboard(content: str, date_str: str) -> bool:
     global _last_dashboard_error
+    logger.info(f"📤 send_to_dashboard 호출: URL={DASHBOARD_URL!r}, len={len(content)}")
     if not DASHBOARD_URL:
         _last_dashboard_error = "DASHBOARD_URL 미설정"
+        logger.error("📤 ❌ DASHBOARD_URL이 빈 문자열! 환경변수 누락 또는 봇 재시작 필요")
         return False
     url = DASHBOARD_URL.rstrip("/") + "/api/post/checkpoint"
     payload = {"content": content, "date": date_str}
@@ -131,11 +133,14 @@ async def send_to_dashboard(content: str, date_str: str) -> bool:
                 body = await resp.text()
                 if resp.status == 200:
                     _last_dashboard_error = ""
+                    logger.info(f"📤 ✅ 대시보드 전송 성공 ({len(content)}자)")
                     return True
                 _last_dashboard_error = f"HTTP {resp.status}: {body[:150]}"
+                logger.error(f"📤 ❌ 대시보드 전송 실패: HTTP {resp.status}: {body[:200]}")
                 return False
     except Exception as e:
         _last_dashboard_error = f"{type(e).__name__}: {str(e)}"[:200]
+        logger.error(f"📤 ❌ 대시보드 전송 예외: {type(e).__name__}: {e}")
         return False
 
 # ── URL 크롤링 ──────────────────────────────────────────
@@ -1392,6 +1397,9 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # 🆕 진단 — 환경변수 상태 즉시 확인
+    logger.info(f"🔧 DASHBOARD_URL = {DASHBOARD_URL!r}")
+    logger.info(f"🔧 API_SECRET    = {'<SET, len=' + str(len(DASHBOARD_API_SECRET)) + '>' if DASHBOARD_API_SECRET else '<EMPTY>'}")
     logger.info("🚀 CheckPoint Bot 시작! (대시보드 fresh-fetch 모드)")
     app.run_polling(drop_pending_updates=True)
 
