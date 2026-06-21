@@ -606,9 +606,26 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
                           prev_cp, re.DOTALL)
         if sec_m:
             body = sec_m.group(2).rstrip()
-            pat = rf"✔️{re.escape(tag_value)}[^\n]*\n(?:.*?\n)*?(?=\n✔️|\Z)"
             if f"✔️{tag_value}" in body:
-                body = re.sub(pat, new_entry + "\n", body, flags=re.DOTALL).rstrip()
+                # 🆕 같은 섹터 chunk — 옛 줄 보존하고 새 bullets만 그 섹션 끝에 추가
+                # (사용자가 칠한 색깔/하이라이트 유지)
+                sec_start = body.find(f"✔️{tag_value}")
+                # 다음 ✔️ 직전 위치 찾기
+                rest = body[sec_start + 1:]
+                next_sec_m = re.search(r"\n✔️", rest)
+                insert_pos = sec_start + 1 + next_sec_m.start() if next_sec_m else len(body)
+                # 새 bullets만 추출 (✔️ 헤더는 빼고 본문만)
+                new_bullets_lines = [l for l in clean_c.split("\n") if l.strip()]
+                # 중복 방지 — 기존 섹션 안에 이미 같은 bullet 있으면 skip
+                existing_section = body[sec_start:insert_pos]
+                new_bullets_to_add = []
+                for line in new_bullets_lines:
+                    stripped = line.strip().lstrip("-").strip()
+                    if stripped and stripped not in existing_section:
+                        new_bullets_to_add.append(line if line.startswith("-") else "- " + line)
+                if new_bullets_to_add:
+                    addition = "\n" + "\n".join(new_bullets_to_add)
+                    body = body[:insert_pos] + addition + body[insert_pos:]
             else:
                 body = body + ("\n\n" if body else "") + new_entry
             prev_cp = prev_cp[:sec_m.start()] + "📌Sector\n" + body + prev_cp[sec_m.end():]
