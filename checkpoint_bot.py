@@ -305,7 +305,12 @@ SYSTEM_PROMPT = """너는 한국 경제방송 앵커의 방송 전 브리핑을 
 11. 기사에 언급된 종목은 해당 섹터 안 "관련 종목:" 줄에만. 코스피/코스닥 칸에 중복 금지.
 12. 최종 출력은 하나의 체크포인트로 통합
 13. KOSPI/KOSDAQ 태그로 들어온 내용은 절대로 섹터로 승격하거나 섹터를 추가로 만들지 말 것.
-14. 각 섹터(✔️)의 불릿은 반드시 최대 2개. 핵심만. 절대 3개 이상 쓰지 말 것.
+14. 각 섹터(✔️) 아래 불릿은 반드시 정확히 3줄:
+    - 1줄: 헤드라인 스타일 핵심 요약 (기사 제목처럼)
+    - 2줄: 부연설명 1
+    - 3줄: 부연설명 2
+15. 모든 불릿은 음슴체로 끝맺음 ('~함', '~됨', '~임', '~옴', '~짐' 등)
+16. 각 불릿 25~40자 내외로 간결하게. 수식어·군더더기 X, 팩트만.
 
 출력 형식:
 {날짜} Check Point✨
@@ -552,12 +557,41 @@ def _build_stock_block(header: str, stock_map: dict) -> str:
     return header + "\n" + "\n\n".join(items)
 
 async def _claude_summarize(text: str) -> str:
+    """기사·링크 텍스트를 3줄 음슴체로 요약.
+    
+    형식:
+    - [헤드라인 스타일 핵심 요약]
+    - [부연설명 1]
+    - [부연설명 2]
+    """
     try:
         resp = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=300,
+            max_tokens=350,
             messages=[{"role": "user", "content":
-                f"아래 기사를 핵심 포인트 2~3줄로 요약해줘. 각 줄은 '- '로 시작. 설명 없이 bullet만.\n\n{text[:3000]}"}]
+                f"""아래 기사를 정확히 3줄로 요약해줘.
+
+형식 (반드시 이대로):
+- [첫 줄: 기사 헤드라인 스타일 핵심 요약]
+- [둘째 줄: 부연설명 1]
+- [셋째 줄: 부연설명 2]
+
+규칙:
+- 각 줄 반드시 '- '로 시작
+- 모두 음슴체로 끝맺음 ('~함', '~됨', '~임', '~옴', '~짐' 등)
+- 각 줄 25~40자 내외로 간결하게
+- 수식어·군더더기 X, 사실만
+- 첫 줄은 기사 제목처럼 강한 한 줄
+- 부연은 첫 줄이 담지 못한 팩트·수치·전망·이유
+- 설명 없이 bullet 3개만 출력
+
+예시:
+- 반도체 장비 매출 5년 연속 성장 전망
+- 국제반도체장비재료협회, 2028년 2,295억 달러 달성 예상
+- AI 인프라 투자로 산업 성장 전망 강화됨
+
+기사:
+{text[:3000]}"""}]
         )
         return resp.content[0].text.strip()
     except Exception:
@@ -574,12 +608,17 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
         header = "📌코스피" if tag_type == "KOSPI" else "📌코스닥"
         m = re.search(rf"{re.escape(header)}\n(.*?)(?=\n📌|\n📡|\Z)", prev_cp, re.DOTALL)
         stock_map = _parse_stock_map(m.group(1)) if m else {}
-        bullets = _summarize_bullets(clean_c)
+        # 🆕 Claude로 3줄 음슴체 요약
+        summary = await _claude_summarize(clean_c) if clean_c.strip() else ""
+        bullets_lines = [l.strip() for l in summary.split("\n") if l.strip().startswith("-")]
         link_url = link_urls[0] if link_urls else None
         if tag_value not in stock_map:
             stock_map[tag_value] = []
-        if bullets:
-            stock_map[tag_value].append((bullets[0], link_url))
+        if bullets_lines:
+            # 첫 줄(헤드라인)에 링크 붙임, 나머지는 링크 없이
+            for i, line in enumerate(bullets_lines):
+                url_for_line = link_url if i == 0 else None
+                stock_map[tag_value].append((line, url_for_line))
         elif link_url:
             stock_map[tag_value].append(("- 관련 기사", link_url))
         new_block = _build_stock_block(header, stock_map)
@@ -596,7 +635,8 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
             for url in link_urls:
                 if url not in sector_link_store[tag_value]:
                     sector_link_store[tag_value].append(url)
-        if len(clean_c) > 200:
+        # 🆕 항상 Claude로 3줄 음슴체 요약 (짧아도)
+        if clean_c.strip():
             clean_c = await _claude_summarize(clean_c)
         title_line = f"✔️{tag_value}"
         for url in link_urls:
@@ -646,7 +686,8 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
         return prev_cp
 
     elif tag_type == "SIGNAL":
-        if len(clean_c) > 200:
+        # 🆕 항상 Claude로 3줄 음슴체 요약
+        if clean_c.strip():
             clean_c = await _claude_summarize(clean_c)
         title_line = (f"☑️ {tag_value}" if tag_value else "")
         for url in link_urls:
@@ -894,16 +935,9 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
                 for lm in link_markers:
                     title_line += f" {lm}"
                 sig_lines.append("☑️ " + title_line)
-                if len(clean_content) > 200:
+                if clean_content.strip():
                     try:
-                        summary_resp = client.messages.create(
-                            model="claude-sonnet-4-6",
-                            max_tokens=300,
-                            messages=[{"role": "user", "content":
-                                f"아래 기사를 핵심 포인트 2~3줄로 요약해줘. "
-                                f"각 줄은 '- '로 시작. 설명 없이 bullet만 출력.\n\n{clean_content[:3000]}"}]
-                        )
-                        summary = summary_resp.content[0].text.strip()
+                        summary = await _claude_summarize(clean_content)
                         for line in summary.split("\n"):
                             line = line.strip()
                             if line:
@@ -912,11 +946,6 @@ async def build_checkpoint(buffer: list, date_str: str, prev_checkpoint: str = N
                         first = clean_content.split("\n")[0].strip()
                         if first:
                             sig_lines.append("- " + first[:100])
-                elif clean_content:
-                    for line in clean_content.split("\n"):
-                        line = line.strip()
-                        if line:
-                            sig_lines.append("- " + line.lstrip("- ").lstrip("• "))
             else:
                 for line in sig_content.split("\n"):
                     if line.strip():
