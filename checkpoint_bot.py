@@ -564,45 +564,40 @@ def _build_stock_block(header: str, stock_map: dict) -> str:
     return header + "\n" + "\n\n".join(items)
 
 async def _claude_summarize(text: str) -> str:
-    """기사·링크 텍스트를 3줄 음슴체로 요약.
-    
-    형식:
-    - [헤드라인 스타일 핵심 요약]
-    - [부연설명 1]
-    - [부연설명 2]
-    """
+    """기사·링크 텍스트를 3줄 음슴체로 요약."""
     try:
         resp = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=350,
             messages=[{"role": "user", "content":
-                f"""아래 기사를 정확히 3줄로 요약해줘.
+                f"""아래 텍스트를 정확히 3줄 bullet로 요약해줘.
+
+⚠️ 절대 금지:
+- "기사 전문이 없다" "본문이 부족하다" "붙여넣어 주시면" 같은 안내·해명 문구
+- 원문이 짧아도 반드시 3줄로 뽑을 것. 없는 내용은 만들지 말고 반복 표현으로라도 채울 것.
+- 설명·서두·마무리 없이 오직 bullet 3개만 출력
 
 ⭐ 언어: 원문이 영어·중국어·일본어 등 어떤 언어든 **한국어로 번역해서 요약**.
 
 형식 (반드시 이대로):
-- [첫 줄: 기사 헤드라인 스타일 핵심 요약]
-- [둘째 줄: 부연설명 1]
-- [셋째 줄: 부연설명 2]
+- [첫 줄: 헤드라인 핵심 요약]
+- [둘째 줄: 부연 1]
+- [셋째 줄: 부연 2]
 
 규칙:
 - 각 줄 반드시 '- '로 시작
 - 모두 음슴체로 끝맺음 ('~함', '~됨', '~임', '~옴', '~짐' 등)
 - 각 줄 25~40자 내외로 간결하게
-- 수식어·군더더기 X, 사실만
-- 첫 줄은 기사 제목처럼 강한 한 줄
-- 부연은 첫 줄이 담지 못한 팩트·수치·전망·이유
-- 설명 없이 bullet 3개만 출력
-- 원문에 포함된 이모지(🌙, ⏰, 🔥 등)는 종목명 뒤에 있으면 그대로 유지
+- 첫 줄은 헤드라인처럼 강한 한 줄
+- 부연은 팩트·수치·전망·이유
+- 원문의 이모지(🌙, ⏰, 🔥 등)는 종목명 뒤에 있으면 그대로 유지
 
-예시 (영어 원문 → 한국어 요약):
-원문: "SEMI forecasts 5-year growth streak, targeting $229.5B by 2028..."
-요약:
+예시:
 - 반도체 장비 매출 5년 연속 성장 전망
 - SEMI, 2028년 2,295억 달러 달성 예상
 - AI 인프라 투자로 산업 성장 전망 강화됨
 
-기사:
+텍스트:
 {text[:3000]}"""}]
         )
         return resp.content[0].text.strip()
@@ -624,9 +619,14 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
         if clean_c.strip():
             lines_check = [l.strip() for l in clean_c.split("\n") if l.strip()]
             is_preformatted = (
-                len(lines_check) >= 2
-                and sum(1 for l in lines_check if l.startswith("-")) >= 2
-                and len(clean_c) < 500
+                # 짧으면 그대로 (사용자가 직접 쓴 짤막 메모)
+                len(clean_c) < 100
+                # 또는 이미 bullet 정리된 형식 (사용자 직접 정리)
+                or (
+                    len(lines_check) >= 2
+                    and sum(1 for l in lines_check if l.startswith("-")) >= 2
+                    and len(clean_c) < 500
+                )
             )
             if is_preformatted:
                 summary = clean_c   # 그대로 사용
@@ -664,9 +664,14 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
         if clean_c.strip():
             lines_check = [l.strip() for l in clean_c.split("\n") if l.strip()]
             is_preformatted = (
-                len(lines_check) >= 2
-                and sum(1 for l in lines_check if l.startswith("-")) >= 2
-                and len(clean_c) < 500
+                # 짧으면 그대로 (사용자가 직접 쓴 짤막 메모)
+                len(clean_c) < 100
+                # 또는 이미 bullet 정리된 형식 (사용자 직접 정리)
+                or (
+                    len(lines_check) >= 2
+                    and sum(1 for l in lines_check if l.startswith("-")) >= 2
+                    and len(clean_c) < 500
+                )
             )
             if not is_preformatted:
                 clean_c = await _claude_summarize(clean_c)
@@ -722,9 +727,14 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
         if clean_c.strip():
             lines_check = [l.strip() for l in clean_c.split("\n") if l.strip()]
             is_preformatted = (
-                len(lines_check) >= 2
-                and sum(1 for l in lines_check if l.startswith("-")) >= 2
-                and len(clean_c) < 500
+                # 짧으면 그대로 (사용자가 직접 쓴 짤막 메모)
+                len(clean_c) < 100
+                # 또는 이미 bullet 정리된 형식 (사용자 직접 정리)
+                or (
+                    len(lines_check) >= 2
+                    and sum(1 for l in lines_check if l.startswith("-")) >= 2
+                    and len(clean_c) < 500
+                )
             )
             if not is_preformatted:
                 clean_c = await _claude_summarize(clean_c)
@@ -754,14 +764,17 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
         return prev_cp
 
     elif tag_type == "US_MARKET":
-        # 🆕 sub-value 있으면 (예: 미증시/유가) ☑️ 형식으로
+        # 🆕 sub-value 있으면 (예: 미증시/유가) ☑️ 형식으로 — 무조건 별도 블록
         if tag_value:
-            # pre-formatted 판정
+            # 짧으면 그대로, 아니면 요약
             lines_check = [l.strip() for l in clean_c.split("\n") if l.strip()]
             is_preformatted = (
-                len(lines_check) >= 2
-                and sum(1 for l in lines_check if l.startswith("-")) >= 2
-                and len(clean_c) < 500
+                len(clean_c) < 100
+                or (
+                    len(lines_check) >= 2
+                    and sum(1 for l in lines_check if l.startswith("-")) >= 2
+                    and len(clean_c) < 500
+                )
             )
             if not is_preformatted and clean_c.strip():
                 clean_c = await _claude_summarize(clean_c)
@@ -772,23 +785,8 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
             usm_m = re.search(r"🇺🇸美증시 마감\n?(.*?)(?=\n📡|\n📌|\Z)", prev_cp, re.DOTALL)
             if usm_m:
                 body = usm_m.group(1).rstrip()
-                # 같은 sub-value 있으면 그 섹션에 append (기존 유지 + 새 bullets)
-                pat_marker = f"☑️ {tag_value}"
-                if pat_marker in body:
-                    sec_start = body.find(pat_marker)
-                    rest = body[sec_start + 1:]
-                    next_m = re.search(r"\n☑️", rest)
-                    insert_pos = sec_start + 1 + next_m.start() if next_m else len(body)
-                    existing_section = body[sec_start:insert_pos]
-                    new_lines = []
-                    for line in clean_c.split("\n"):
-                        stripped = line.strip().lstrip("-").strip()
-                        if stripped and stripped not in existing_section:
-                            new_lines.append(line if line.startswith("-") else "- " + line)
-                    if new_lines:
-                        body = body[:insert_pos] + "\n" + "\n".join(new_lines) + body[insert_pos:]
-                else:
-                    body = body + ("\n\n" if body else "") + new_entry
+                # 🆕 같은 sub-value가 있어도 무조건 새 블록으로 (사용자가 겹쳐 보내도 별도 유지)
+                body = body + ("\n\n" if body else "") + new_entry
                 prev_cp = prev_cp[:usm_m.start()] + "🇺🇸美증시 마감\n" + body + prev_cp[usm_m.end():]
             else:
                 ins = re.search(r"\n📡|\n📌|\Z", prev_cp)
