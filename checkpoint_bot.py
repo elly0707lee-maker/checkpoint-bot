@@ -455,6 +455,13 @@ def parse_user_tag(text: str):
     if re.match(r"^NXT\s*/\s*", text, re.IGNORECASE):
         content = re.sub(r"^NXT\s*/\s*", "", text, flags=re.IGNORECASE).strip()
         return "NXT", "", content
+    # 🆕 미증시/유가, 미증시/금 등 sub-value 태그 인식
+    us_tag_match = re.match(r"^(?:미증시|美증시)\s*/\s*(.+?)[\n\r]", text + "\n", re.IGNORECASE)
+    if us_tag_match:
+        return "US_MARKET", us_tag_match.group(1).strip(), text[us_tag_match.end():].strip()
+    if re.match(r"^(?:미증시|美증시)\s*/\s*", text, re.IGNORECASE):
+        content = re.sub(r"^(?:미증시|美증시)\s*/\s*", "", text, flags=re.IGNORECASE).strip()
+        return "US_MARKET", "", content
     us_keywords = ["다우", "나스닥", "s&p", "S&P", "미증시", "美증시", "뉴욕증시", "월스트리트",
                    "미 증시", "미증시", "미국증시", "미국 증시"]
     if any(kw in text for kw in us_keywords):
@@ -571,6 +578,8 @@ async def _claude_summarize(text: str) -> str:
             messages=[{"role": "user", "content":
                 f"""아래 기사를 정확히 3줄로 요약해줘.
 
+⭐ 언어: 원문이 영어·중국어·일본어 등 어떤 언어든 **한국어로 번역해서 요약**.
+
 형식 (반드시 이대로):
 - [첫 줄: 기사 헤드라인 스타일 핵심 요약]
 - [둘째 줄: 부연설명 1]
@@ -584,10 +593,13 @@ async def _claude_summarize(text: str) -> str:
 - 첫 줄은 기사 제목처럼 강한 한 줄
 - 부연은 첫 줄이 담지 못한 팩트·수치·전망·이유
 - 설명 없이 bullet 3개만 출력
+- 원문에 포함된 이모지(🌙, ⏰, 🔥 등)는 종목명 뒤에 있으면 그대로 유지
 
-예시:
+예시 (영어 원문 → 한국어 요약):
+원문: "SEMI forecasts 5-year growth streak, targeting $229.5B by 2028..."
+요약:
 - 반도체 장비 매출 5년 연속 성장 전망
-- 국제반도체장비재료협회, 2028년 2,295억 달러 달성 예상
+- SEMI, 2028년 2,295억 달러 달성 예상
 - AI 인프라 투자로 산업 성장 전망 강화됨
 
 기사:
@@ -608,8 +620,20 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
         header = "📌코스피" if tag_type == "KOSPI" else "📌코스닥"
         m = re.search(rf"{re.escape(header)}\n(.*?)(?=\n📌|\n📡|\Z)", prev_cp, re.DOTALL)
         stock_map = _parse_stock_map(m.group(1)) if m else {}
-        # 🆕 Claude로 3줄 음슴체 요약
-        summary = await _claude_summarize(clean_c) if clean_c.strip() else ""
+        # 🆕 사용자가 이미 정리한 형식이면 그대로 사용 (요약 X)
+        if clean_c.strip():
+            lines_check = [l.strip() for l in clean_c.split("\n") if l.strip()]
+            is_preformatted = (
+                len(lines_check) >= 2
+                and sum(1 for l in lines_check if l.startswith("-")) >= 2
+                and len(clean_c) < 500
+            )
+            if is_preformatted:
+                summary = clean_c   # 그대로 사용
+            else:
+                summary = await _claude_summarize(clean_c)
+        else:
+            summary = ""
         bullets_lines = [l.strip() for l in summary.split("\n") if l.strip().startswith("-")]
         link_url = link_urls[0] if link_urls else None
         if tag_value not in stock_map:
@@ -635,9 +659,17 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
             for url in link_urls:
                 if url not in sector_link_store[tag_value]:
                     sector_link_store[tag_value].append(url)
-        # 🆕 항상 Claude로 3줄 음슴체 요약 (짧아도)
+        # 🆕 사용자가 이미 정리한 형식이면 그대로 사용 (요약 X)
+        # 판정: bullet 2개 이상 + 500자 미만 = pre-formatted
         if clean_c.strip():
-            clean_c = await _claude_summarize(clean_c)
+            lines_check = [l.strip() for l in clean_c.split("\n") if l.strip()]
+            is_preformatted = (
+                len(lines_check) >= 2
+                and sum(1 for l in lines_check if l.startswith("-")) >= 2
+                and len(clean_c) < 500
+            )
+            if not is_preformatted:
+                clean_c = await _claude_summarize(clean_c)
         title_line = f"✔️{tag_value}"
         for url in link_urls:
             title_line += f" [[LINK:{url}]]"
@@ -686,9 +718,16 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
         return prev_cp
 
     elif tag_type == "SIGNAL":
-        # 🆕 항상 Claude로 3줄 음슴체 요약
+        # 🆕 사용자가 이미 정리한 형식이면 그대로 사용 (요약 X)
         if clean_c.strip():
-            clean_c = await _claude_summarize(clean_c)
+            lines_check = [l.strip() for l in clean_c.split("\n") if l.strip()]
+            is_preformatted = (
+                len(lines_check) >= 2
+                and sum(1 for l in lines_check if l.startswith("-")) >= 2
+                and len(clean_c) < 500
+            )
+            if not is_preformatted:
+                clean_c = await _claude_summarize(clean_c)
         title_line = (f"☑️ {tag_value}" if tag_value else "")
         for url in link_urls:
             title_line += f" [[LINK:{url}]]"
@@ -715,14 +754,56 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
         return prev_cp
 
     elif tag_type == "US_MARKET":
-        usm_m = re.search(r"🇺🇸美증시 마감\n?(.*?)(?=\n📡|\n📌|\Z)", prev_cp, re.DOTALL)
-        new_block = "🇺🇸美증시 마감\n" + clean_c
-        if usm_m:
-            prev_cp = prev_cp[:usm_m.start()] + new_block + prev_cp[usm_m.end():]
+        # 🆕 sub-value 있으면 (예: 미증시/유가) ☑️ 형식으로
+        if tag_value:
+            # pre-formatted 판정
+            lines_check = [l.strip() for l in clean_c.split("\n") if l.strip()]
+            is_preformatted = (
+                len(lines_check) >= 2
+                and sum(1 for l in lines_check if l.startswith("-")) >= 2
+                and len(clean_c) < 500
+            )
+            if not is_preformatted and clean_c.strip():
+                clean_c = await _claude_summarize(clean_c)
+            title_line = f"☑️ {tag_value}"
+            for url in link_urls:
+                title_line += f" [[LINK:{url}]]"
+            new_entry = title_line + ("\n" + clean_c if clean_c else "")
+            usm_m = re.search(r"🇺🇸美증시 마감\n?(.*?)(?=\n📡|\n📌|\Z)", prev_cp, re.DOTALL)
+            if usm_m:
+                body = usm_m.group(1).rstrip()
+                # 같은 sub-value 있으면 그 섹션에 append (기존 유지 + 새 bullets)
+                pat_marker = f"☑️ {tag_value}"
+                if pat_marker in body:
+                    sec_start = body.find(pat_marker)
+                    rest = body[sec_start + 1:]
+                    next_m = re.search(r"\n☑️", rest)
+                    insert_pos = sec_start + 1 + next_m.start() if next_m else len(body)
+                    existing_section = body[sec_start:insert_pos]
+                    new_lines = []
+                    for line in clean_c.split("\n"):
+                        stripped = line.strip().lstrip("-").strip()
+                        if stripped and stripped not in existing_section:
+                            new_lines.append(line if line.startswith("-") else "- " + line)
+                    if new_lines:
+                        body = body[:insert_pos] + "\n" + "\n".join(new_lines) + body[insert_pos:]
+                else:
+                    body = body + ("\n\n" if body else "") + new_entry
+                prev_cp = prev_cp[:usm_m.start()] + "🇺🇸美증시 마감\n" + body + prev_cp[usm_m.end():]
+            else:
+                ins = re.search(r"\n📡|\n📌|\Z", prev_cp)
+                pos = ins.start() if ins and ins.group() != "" else len(prev_cp)
+                prev_cp = prev_cp[:pos] + "\n🇺🇸美증시 마감\n" + new_entry + prev_cp[pos:]
         else:
-            ins = re.search(r"\n📡|\n📌|\Z", prev_cp)
-            pos = ins.start() if ins and ins.group() != "" else len(prev_cp)
-            prev_cp = prev_cp[:pos] + "\n" + new_block + prev_cp[pos:]
+            # 옛 방식: sub-value 없으면 전체 교체
+            usm_m = re.search(r"🇺🇸美증시 마감\n?(.*?)(?=\n📡|\n📌|\Z)", prev_cp, re.DOTALL)
+            new_block = "🇺🇸美증시 마감\n" + clean_c
+            if usm_m:
+                prev_cp = prev_cp[:usm_m.start()] + new_block + prev_cp[usm_m.end():]
+            else:
+                ins = re.search(r"\n📡|\n📌|\Z", prev_cp)
+                pos = ins.start() if ins and ins.group() != "" else len(prev_cp)
+                prev_cp = prev_cp[:pos] + "\n" + new_block + prev_cp[pos:]
         return prev_cp
 
     elif tag_type == "AFTER_MARKET":
@@ -1247,7 +1328,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "SECTOR": f"✔️섹터/{tag_value}",
             "KOSPI": f"📌코스피/{tag_value}",
             "KOSDAQ": f"📌코스닥/{tag_value}",
-            "US_MARKET": "🇺🇸美증시 마감",
+            "US_MARKET": f"🇺🇸美증시/{tag_value}" if tag_value else "🇺🇸美증시 마감",
             "INDICATOR": "📊지표",
             "AFTER_MARKET": "📌시간외 특이종목",
             "NXT": "📌NXT 괴리율",
