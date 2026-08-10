@@ -565,6 +565,7 @@ def _build_stock_block(header: str, stock_map: dict) -> str:
 
 async def _claude_summarize(text: str) -> str:
     """기사·링크 텍스트를 3줄 음슴체로 요약."""
+    original_len = len(text)
     try:
         resp = client.messages.create(
             model="claude-sonnet-4-6",
@@ -600,9 +601,23 @@ async def _claude_summarize(text: str) -> str:
 텍스트:
 {text[:3000]}"""}]
         )
-        return resp.content[0].text.strip()
-    except Exception:
-        return text
+        result = resp.content[0].text.strip()
+
+        # 🆕 안전망: 요약 결과가 여전히 원본과 비슷하게 길면 강제로 3줄만
+        bullets = [l for l in result.split("\n") if l.strip().startswith("-")]
+        if len(bullets) >= 2:
+            # bullet 형식이면 처음 3개만
+            result = "\n".join(bullets[:3])
+        elif len(result) > 300 or len(result) > original_len * 0.7:
+            # 여전히 너무 길고 bullet 형식도 아님 → 실패로 취급, 앞부분만
+            print(f"[summarize] 요약 실패 감지 (원본 {original_len}자 → 결과 {len(result)}자)")
+            result = "- (자동 요약 실패)\n- " + text.strip().replace("\n", " ")[:200] + "..."
+        return result
+    except Exception as e:
+        print(f"[summarize] API 에러: {e}")
+        # 🆕 실패 시 원본 반환 대신 앞부분만 잘라서 반환 (구구절절 방지)
+        preview = text.strip().replace("\n", " ")[:200]
+        return f"- (요약 실패, 원문 앞부분)\n- {preview}..."
 
 async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: str,
                         sector_link_store: dict, date_str: str) -> str:
@@ -619,13 +634,16 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
         if clean_c.strip():
             lines_check = [l.strip() for l in clean_c.split("\n") if l.strip()]
             is_preformatted = (
-                # 짧으면 그대로 (사용자가 직접 쓴 짤막 메모)
-                len(clean_c) < 100
-                # 또는 이미 bullet 정리된 형식 (사용자 직접 정리)
-                or (
-                    len(lines_check) >= 2
-                    and sum(1 for l in lines_check if l.startswith("-")) >= 2
-                    and len(clean_c) < 500
+                # 🆕 링크 크롤 결과면 무조건 요약 (사용자 정리 아님)
+                (not link_urls) and (
+                    # 짧으면 그대로 (사용자가 직접 쓴 짤막 메모)
+                    len(clean_c) < 100
+                    # 또는 이미 bullet 정리된 형식 (사용자 직접 정리) — 조건 강화
+                    or (
+                        len(lines_check) >= 2
+                        and sum(1 for l in lines_check if l.startswith("-")) >= max(2, len(lines_check) // 2)
+                        and len(clean_c) < 400
+                    )
                 )
             )
             if is_preformatted:
@@ -664,13 +682,16 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
         if clean_c.strip():
             lines_check = [l.strip() for l in clean_c.split("\n") if l.strip()]
             is_preformatted = (
-                # 짧으면 그대로 (사용자가 직접 쓴 짤막 메모)
-                len(clean_c) < 100
-                # 또는 이미 bullet 정리된 형식 (사용자 직접 정리)
-                or (
-                    len(lines_check) >= 2
-                    and sum(1 for l in lines_check if l.startswith("-")) >= 2
-                    and len(clean_c) < 500
+                # 🆕 링크 크롤 결과면 무조건 요약 (사용자 정리 아님)
+                (not link_urls) and (
+                    # 짧으면 그대로 (사용자가 직접 쓴 짤막 메모)
+                    len(clean_c) < 100
+                    # 또는 이미 bullet 정리된 형식 (사용자 직접 정리) — 조건 강화
+                    or (
+                        len(lines_check) >= 2
+                        and sum(1 for l in lines_check if l.startswith("-")) >= max(2, len(lines_check) // 2)
+                        and len(clean_c) < 400
+                    )
                 )
             )
             if not is_preformatted:
@@ -727,13 +748,16 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
         if clean_c.strip():
             lines_check = [l.strip() for l in clean_c.split("\n") if l.strip()]
             is_preformatted = (
-                # 짧으면 그대로 (사용자가 직접 쓴 짤막 메모)
-                len(clean_c) < 100
-                # 또는 이미 bullet 정리된 형식 (사용자 직접 정리)
-                or (
-                    len(lines_check) >= 2
-                    and sum(1 for l in lines_check if l.startswith("-")) >= 2
-                    and len(clean_c) < 500
+                # 🆕 링크 크롤 결과면 무조건 요약 (사용자 정리 아님)
+                (not link_urls) and (
+                    # 짧으면 그대로 (사용자가 직접 쓴 짤막 메모)
+                    len(clean_c) < 100
+                    # 또는 이미 bullet 정리된 형식 (사용자 직접 정리) — 조건 강화
+                    or (
+                        len(lines_check) >= 2
+                        and sum(1 for l in lines_check if l.startswith("-")) >= max(2, len(lines_check) // 2)
+                        and len(clean_c) < 400
+                    )
                 )
             )
             if not is_preformatted:
@@ -769,11 +793,14 @@ async def instant_merge(prev_cp: str, tag_type: str, tag_value: str, content: st
             # 짧으면 그대로, 아니면 요약
             lines_check = [l.strip() for l in clean_c.split("\n") if l.strip()]
             is_preformatted = (
-                len(clean_c) < 100
-                or (
-                    len(lines_check) >= 2
-                    and sum(1 for l in lines_check if l.startswith("-")) >= 2
-                    and len(clean_c) < 500
+                # 🆕 링크 크롤 결과면 무조건 요약 (사용자 정리 아님)
+                (not link_urls) and (
+                    len(clean_c) < 100
+                    or (
+                        len(lines_check) >= 2
+                        and sum(1 for l in lines_check if l.startswith("-")) >= max(2, len(lines_check) // 2)
+                        and len(clean_c) < 400
+                    )
                 )
             )
             if not is_preformatted and clean_c.strip():
@@ -1344,6 +1371,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
              "AFTER_MARKET": "📌시간외 특이종목", "NXT": "📌NXT 괴리율", "AUTO": "🔍자동분류"}
         return m.get(tt, tv)
 
+    # 🆕 링크만 있고 태그 없음 → pending_content로 저장, 태그 대기
+    #    (사용자가 링크 먼저 보내고 그 다음 코스닥/xxx 태그 보내는 패턴)
+    if (has_url and len(parsed_blocks) == 1 and parsed_blocks[0][0] == "AUTO"
+            and not user_state[user_id].get("pending_tag")):
+        user_state[user_id]["pending_content"] = enriched_text
+        user_state[user_id]["pending_content_at"] = datetime.now().timestamp()
+        await update.message.reply_text(
+            "🔗 링크 받았어요! 어떻게 분류할까요?\n"
+            "예: 코스닥/가비아, 섹터/반도체, 시그널/트럼프발언 등\n"
+            "(3분 안에 태그 보내면 이 링크와 묶어드림)"
+        )
+        return
+
     # 단일 태그-only → pending or 재태깅
     if len(parsed_blocks) == 1:
         tag_type, tag_value, content = parsed_blocks[0]
@@ -1353,6 +1393,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if is_tag_only:
             label = get_label(tag_type, tag_value)
+            # 🆕 pending_content 확인 — 링크 먼저 왔으면 여기서 병합
+            pending_content = user_state[user_id].get("pending_content")
+            pending_at = user_state[user_id].get("pending_content_at", 0)
+            if pending_content and (datetime.now().timestamp() - pending_at < 180):
+                # 3분 안이면 병합해서 즉시 처리
+                user_state[user_id]["pending_content"] = None
+                user_state[user_id]["pending_content_at"] = 0
+                await fetch_fresh_state(user_id)
+                date_str_now = user_state[user_id].get("date", datetime.now().strftime("%-m/%-d"))
+                new_cp = await instant_merge(
+                    user_state[user_id].get("last_checkpoint", ""),
+                    tag_type, tag_value, pending_content,
+                    user_state[user_id]["sector_link_store"], date_str_now
+                )
+                user_state[user_id]["last_checkpoint"] = new_cp
+                asyncio.create_task(send_to_dashboard(new_cp, date_str_now))
+                await update.message.reply_text(f"✅ {label} + 이전 링크 병합 → 대시보드 업데이트됨")
+                return
+
             buf = user_state[user_id]["buffer"]
             if buf and buf[-1][0] == "AUTO":
                 _, _, prev_content = buf[-1]
