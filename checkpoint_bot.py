@@ -1336,32 +1336,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         enriched_text = text
 
     if pending:
-        tag_type, tag_value = pending
-        content = enriched_text
-        user_state[user_id]["pending_tag"] = None
-        # 🆕 매번 fresh fetch — 사용자 편집 항상 반영
-        await fetch_fresh_state(user_id)
-        date_str_now = user_state[user_id].get("date", datetime.now().strftime("%-m/%-d"))
-        new_cp = await instant_merge(
-            user_state[user_id].get("last_checkpoint", ""),
-            tag_type, tag_value, content,
-            user_state[user_id]["sector_link_store"], date_str_now
-        )
-        user_state[user_id]["last_checkpoint"] = new_cp
-        asyncio.create_task(send_to_dashboard(new_cp, date_str_now))
-        tag_display = {
-            "SECTOR": f"✔️섹터/{tag_value}",
-            "KOSPI": f"📌코스피/{tag_value}",
-            "KOSDAQ": f"📌코스닥/{tag_value}",
-            "US_MARKET": f"🇺🇸美증시/{tag_value}" if tag_value else "🇺🇸美증시 마감",
-            "INDICATOR": "📊지표",
-            "AFTER_MARKET": "📌시간외 특이종목",
-            "NXT": "📌NXT 괴리율",
-            "SIGNAL": "📡시장 시그널",
-        }
-        label = tag_display.get(tag_type, tag_value)
-        await update.message.reply_text(f"✅ {label} → 대시보드 업데이트됨")
-        return
+        # 🆕 텍스트에 이미 명시적 태그가 있으면 pending 무시하고 원래 파싱대로 처리
+        # (사용자가 새로 태그 붙였는데 옛 pending 남아서 덮어쓰는 버그 방지)
+        has_explicit_tag = bool(re.search(
+            r"^(?:섹터|코스피|코스닥|시그널|지표|미증시|美증시|NXT|시간외)\s*/",
+            enriched_text, re.MULTILINE | re.IGNORECASE
+        ))
+        if has_explicit_tag:
+            user_state[user_id]["pending_tag"] = None
+            pending = None
+            # 아래 parse_multi_tag로 정상 처리됨
+        else:
+            tag_type, tag_value = pending
+            content = enriched_text
+            user_state[user_id]["pending_tag"] = None
+            # 🆕 매번 fresh fetch — 사용자 편집 항상 반영
+            await fetch_fresh_state(user_id)
+            date_str_now = user_state[user_id].get("date", datetime.now().strftime("%-m/%-d"))
+            new_cp = await instant_merge(
+                user_state[user_id].get("last_checkpoint", ""),
+                tag_type, tag_value, content,
+                user_state[user_id]["sector_link_store"], date_str_now
+            )
+            user_state[user_id]["last_checkpoint"] = new_cp
+            asyncio.create_task(send_to_dashboard(new_cp, date_str_now))
+            tag_display = {
+                "SECTOR": f"✔️섹터/{tag_value}",
+                "KOSPI": f"📌코스피/{tag_value}",
+                "KOSDAQ": f"📌코스닥/{tag_value}",
+                "US_MARKET": f"🇺🇸美증시/{tag_value}" if tag_value else "🇺🇸美증시 마감",
+                "INDICATOR": "📊지표",
+                "AFTER_MARKET": "📌시간외 특이종목",
+                "NXT": "📌NXT 괴리율",
+                "SIGNAL": "📡시장 시그널",
+            }
+            label = tag_display.get(tag_type, tag_value)
+            await update.message.reply_text(f"✅ {label} → 대시보드 업데이트됨")
+            return
 
     parsed_blocks = parse_multi_tag(enriched_text)
 
